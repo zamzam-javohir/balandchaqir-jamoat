@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS rides(
   id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL,
   kind TEXT NOT NULL,                   -- driver | request
   prayer TEXT NOT NULL, date TEXT NOT NULL, depart_time TEXT NOT NULL,
-  seats INTEGER DEFAULT 0, note TEXT, share_phone INTEGER DEFAULT 0,
+  seats INTEGER DEFAULT 0, note TEXT, share_phone INTEGER DEFAULT 0, lat REAL, lon REAL,
   expires_at TEXT NOT NULL, created_at TEXT);
 CREATE TABLE IF NOT EXISTS ride_joins(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ride_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
@@ -63,6 +63,10 @@ def init():
     os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
     with _lock, connect() as c:
         c.executescript(SCHEMA)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(rides)")}
+        for col in ("lat", "lon"):
+            if col not in cols:
+                c.execute(f"ALTER TABLE rides ADD COLUMN {col} REAL")
 
 
 def q(sql, args=(), one=False):

@@ -45,6 +45,17 @@ async def safe_send(chat_id: int, text: str, **kw) -> bool:
         return False
 
 
+async def safe_location(chat_id: int, lat: float, lon: float) -> bool:
+    if bot is None:
+        return False
+    try:
+        await bot.send_location(chat_id, lat, lon)
+        return True
+    except Exception as e:
+        log.warning("location to %s failed: %s", chat_id, e)
+        return False
+
+
 async def broadcast(text: str, ids: list[int] | None = None, with_button=True) -> int:
     ids = db.approved_ids() if ids is None else ids
     ok = 0

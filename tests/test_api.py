@@ -104,6 +104,22 @@ with TestClient(main.app) as c:
     check("ro'yxatda 2 ta e'lon", len(r) == 2)
     check("haydovchi telefoni ulashilgan", ra["author"]["phone"] == "+998901234567" and ra["free"] == 1, ra)
     check("boshqa namozda e'lon yo'q", c.get("/api/rides?prayer=asr", headers=b).json()["rides"] == [])
+    r = c.post("/api/rides", json={"kind": "driver", "prayer": "bomdod", "day": "tomorrow", "depart_time": "05:05", "seats": 2, "lat": 39.96, "lon": 68.78}, headers=a)
+    lid = r.json()["id"]
+    check("joylashuvli e'lon yaratildi", r.status_code == 200)
+    ride = next(x for x in c.get("/api/rides?prayer=bomdod", headers=b).json()["rides"] if x["id"] == lid)
+    check("e'londa lat/lon qaytadi", ride["has_location"] and ride["lat"] == 39.96 and ride["lon"] == 68.78, ride)
+    nl = next(x for x in c.get("/api/rides?prayer=bomdod", headers=b).json()["rides"] if x["id"] == rid)
+    check("joylashuvsiz e'lon: has_location=False", nl["has_location"] is False and nl["lat"] is None)
+    check("faqat lat -> 400", c.post("/api/rides", json={"kind": "request", "prayer": "bomdod", "day": "tomorrow", "depart_time": "05:10", "lat": 39.9}, headers=b).status_code == 400)
+    check("noto'g'ri lat -> 400", c.post("/api/rides", json={"kind": "request", "prayer": "bomdod", "day": "tomorrow", "depart_time": "05:10", "lat": 99, "lon": 10}, headers=b).status_code == 400)
+    locs = []
+    async def _loc(chat_id, lat, lon): locs.append((chat_id, lat, lon)); return True
+    _orig = main.bl.safe_location; main.bl.safe_location = _loc
+    check("joylashuvli e'longa qo'shilish", c.post(f"/api/rides/{lid}/join", headers=b).status_code == 200)
+    main.bl.safe_location = _orig
+    check("joiner va muallifga sendLocation chaqirildi", {x[0] for x in locs} == {2001, 2002} and all(x[1:] == (39.96, 68.78) for x in locs), locs)
+    c.delete(f"/api/rides/{lid}", headers=a)
     check("o'z e'loniga qo'shila olmaydi", c.post(f"/api/rides/{rid}/join", headers=a).status_code == 400)
     r = c.post(f"/api/rides/{rid}/join", headers=b)
     check("«Men ham boraman» ishladi", r.status_code == 200 and r.json()["contact"]["username"] == "ali_u", r.text)

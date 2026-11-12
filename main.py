@@ -79,6 +79,8 @@ class RideIn(BaseModel):
     seats: int = 0
     note: str = ""
     share_phone: bool = False
+    lat: float | None = None
+    lon: float | None = None
 
 class VoteIn(BaseModel):
     answer: str
@@ -238,6 +240,7 @@ def ride_json(r: dict, me: dict, joins: list[dict]) -> dict:
                       "phone": (author.get("phone") or "") if r["share_phone"] else ""},
            "mine": mine, "joined": my_join, "join_count": len(joins),
            "free": max(0, r["seats"] - len(joins)) if r["kind"] == "driver" else None,
+           "lat": r.get("lat"), "lon": r.get("lon"), "has_location": r.get("lat") is not None and r.get("lon") is not None,
            "joiners": []}
     if mine:
         for j in joins:
@@ -273,14 +276,19 @@ async def api_ride_create(body: RideIn, user: dict = Depends(member)):
         raise HTTPException(400, "Bo'sh joylar soni 1 dan 8 gacha bo'lsin")
     if body.share_phone and not user.get("phone"):
         raise HTTPException(400, "Telefon raqamingiz saqlanmagan")
+    lat, lon = body.lat, body.lon
+    if (lat is None) != (lon is None):
+        raise HTTPException(400, "Joylashuv to'liq emas")
+    if lat is not None and not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise HTTPException(400, "Joylashuv noto'g'ri")
     d = db.now().date() + (timedelta(days=1) if body.day == "tomorrow" else timedelta())
     dep = prayer.to_dt(d, body.depart_time)
     exp = dep + timedelta(minutes=30)
     if exp <= db.now():
         raise HTTPException(400, "Bu vaqt allaqachon o'tib ketgan. «Ertaga»ni tanlang yoki vaqtni o'zgartiring")
-    rid = db.x("INSERT INTO rides(author_id,kind,prayer,date,depart_time,seats,note,share_phone,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+    rid = db.x("INSERT INTO rides(author_id,kind,prayer,date,depart_time,seats,note,share_phone,lat,lon,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                (user["tg_id"], body.kind, body.prayer, d.isoformat(), body.depart_time, seats,
-                body.note.strip()[:200], 1 if body.share_phone else 0, exp.strftime("%Y-%m-%d %H:%M"), db.now_str()))
+                body.note.strip()[:200], 1 if body.share_phone else 0, lat, lon, exp.strftime("%Y-%m-%d %H:%M"), db.now_str()))
     return {"id": rid}
 
 
@@ -324,7 +332,13 @@ async def api_ride_join(rid: int, user: dict = Depends(member)):
     lines = [head, f"🕒 {when}", f"👤 {bl.user_link(user)}" + (f" (@{user['username']})" if user.get("username") else "")]
     if user.get("phone"):
         lines.append(f"📞 {html.escape(user['phone'])}")
+    if r.get("lat") is not None and r.get("lon") is not None:
+        lines.append("📍 E'londagi joylashuv pastda yuborildi.")
     await bl.safe_send(author["tg_id"], "\n".join(lines))
+    if r.get("lat") is not None and r.get("lon") is not None:
+        await bl.safe_location(author["tg_id"], r["lat"], r["lon"])
+        await bl.safe_send(user["tg_id"], "📍 E'londagi joylashuv (navigatsiya uchun):")
+        await bl.safe_location(user["tg_id"], r["lat"], r["lon"])
     return {"ok": True, "contact": contact_of(author, bool(r["share_phone"]))}
 
 

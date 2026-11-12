@@ -219,8 +219,33 @@ async function renderBirga() {
   view.querySelectorAll('.chip').forEach(c => c.onclick = () => { state.prayer = c.dataset.p; renderBirga(); });
   $('#bDrv').onclick = () => rideForm('driver'); $('#bReq').onclick = () => rideForm('request');
   view.querySelectorAll('[data-join]').forEach(b => b.onclick = () => joinRide(+b.dataset.join));
+  view.querySelectorAll('.loclink').forEach(a => a.onclick = (ev) => { ev.preventDefault(); openMap(a.dataset.lat, a.dataset.lon); });
   view.querySelectorAll('[data-leave]').forEach(b => b.onclick = async () => { try { await api(`/api/rides/${b.dataset.leave}/join`, 'DELETE'); renderBirga(); } catch (e) { toast(e.message, true); } });
   view.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => { if (!confirm("E'lonni o'chirasizmi?")) return; try { await api('/api/rides/' + b.dataset.del, 'DELETE'); toast("O'chirildi"); renderBirga(); } catch (e) { toast(e.message, true); } });
+}
+function openMap(lat, lon) {
+  const url = `https://maps.google.com/?q=${lat},${lon}`;
+  if (tg && tg.openLink) tg.openLink(url); else window.open(url, '_blank');
+}
+// Qurilma joylashuvi: avval Telegram LocationManager, bo'lmasa navigator.geolocation
+function getDeviceLocation() {
+  return new Promise((resolve, reject) => {
+    const denied = () => reject(new Error("Joylashuvga ruxsat berilmadi. Telefon yoki Telegram sozlamalaridan ruxsat bering"));
+    const viaBrowser = () => {
+      if (!navigator.geolocation) return reject(new Error("Qurilmangiz joylashuvni aniqlay olmadi"));
+      navigator.geolocation.getCurrentPosition(p => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
+        e => e && e.code === 1 ? denied() : reject(new Error("Joylashuvni aniqlab bo'lmadi. Qayta urinib ko'ring")),
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+    };
+    const lm = tg && tg.LocationManager;
+    if (!lm) return viaBrowser();
+    const ask = () => lm.getLocation(d => {
+      if (d && typeof d.latitude === 'number') return resolve({ lat: d.latitude, lon: d.longitude });
+      try { if (lm.isAccessRequested && !lm.isAccessGranted) { if (lm.openSettings) lm.openSettings(); return denied(); } } catch (e) {}
+      viaBrowser();
+    });
+    try { if (lm.isInited) ask(); else lm.init(ask); } catch (e) { viaBrowser(); }
+  });
 }
 function rideCard(r) {
   const drv = r.kind === 'driver';
@@ -236,7 +261,7 @@ function rideCard(r) {
   return `<div class="card ride"><div class="head"><span class="pill ${drv ? 'drv' : 'req'}">${drv ? 'Mashinada chiqaman' : 'Mashinam yo\'q, olib keting'}</span><span class="big">${esc(r.depart_time)}</span></div>
   <div class="who">${esc(r.author.name)}${r.mine ? ' (siz)' : ''}</div>
   <div class="meta"><span>📅 ${day}</span>${drv ? `<span>💺 ${r.free}/${r.seats} joy bo'sh</span>` : `<span>🙋 ${r.join_count} ta taklif</span>`}${phone}</div>
-  ${r.note ? `<div class="muted" style="margin-bottom:8px">💬 ${esc(r.note)}</div>` : ''}${joiners}${contact}${action}</div>`;
+  ${r.note ? `<div class="muted" style="margin-bottom:8px">💬 ${esc(r.note)}</div>` : ''}${r.has_location ? `<div style="margin-bottom:8px"><a href="#" class="loclink" data-lat="${+r.lat}" data-lon="${+r.lon}">📍 Joylashuv</a></div>` : ''}${joiners}${contact}${action}</div>`;
 }
 async function joinRide(id) {
   try {
@@ -255,10 +280,18 @@ async function rideForm(kind) {
   ${drv ? `<label>Bo'sh joylar soni</label><input type="number" id="rSeats" min="1" max="8" value="3">` : ''}
   <label>Izoh (ixtiyoriy)</label><input type="text" id="rNote" maxlength="200" placeholder="${drv ? 'Masalan: Markaz ko\'chasidan olaman' : 'Masalan: Maktab oldida turaman'}">
   <label class="chk"><input type="checkbox" id="rPhone"> Telefon raqamimni e'londa ko'rsatish</label>
+  <div class="btns" style="margin:8px 0"><button class="btn ghost" id="rLoc" type="button">📍 Joylashuvni qo'shish</button></div><div class="muted" id="rLocInfo" style="margin-bottom:8px"></div>
   <div class="btns"><button class="btn ghost" onclick="closeSheet()">Bekor</button><button class="btn" id="rSave">E'lon qilish</button></div>`);
+  let loc = null;
+  $('#rLoc').onclick = async () => {
+    const btn = $('#rLoc'); btn.disabled = true; $('#rLocInfo').textContent = 'Joylashuv aniqlanmoqda…';
+    try { loc = await getDeviceLocation(); btn.textContent = '📍 Joylashuv qo\'shildi ✅ (qayta aniqlash)'; $('#rLocInfo').textContent = `${loc.lat.toFixed(5)}, ${loc.lon.toFixed(5)}`; }
+    catch (e) { loc = null; $('#rLocInfo').textContent = ''; toast(e.message, true); }
+    btn.disabled = false;
+  };
   $('#rSave').onclick = async () => {
     try {
-      await api('/api/rides', 'POST', { kind, prayer: state.prayer, day: $('#rDay').value, depart_time: $('#rTime').value, seats: drv ? +$('#rSeats').value : 0, note: $('#rNote').value, share_phone: $('#rPhone').checked });
+      await api('/api/rides', 'POST', { lat: loc ? loc.lat : null, lon: loc ? loc.lon : null, kind, prayer: state.prayer, day: $('#rDay').value, depart_time: $('#rTime').value, seats: drv ? +$('#rSeats').value : 0, note: $('#rNote').value, share_phone: $('#rPhone').checked });
       closeSheet(); toast("E'lon joylandi ✅"); renderBirga();
     } catch (e) { toast(e.message, true); }
   };
