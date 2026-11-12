@@ -32,6 +32,11 @@ try:
     call(2002, "POST", "/api/rides", {"kind": "request", "prayer": "bomdod", "day": "tomorrow", "depart_time": "05:25", "note": "Maktab oldida turaman"})
     rid = call(2003, "POST", "/api/rides", {"kind": "driver", "prayer": "bomdod", "day": "tomorrow", "depart_time": "05:30", "seats": 4})["id"]
     call(2002, "POST", f"/api/rides/{rid}/join")
+    import datetime as _d
+    _tm = (_d.datetime.utcnow() + _d.timedelta(hours=5, days=1)).date().isoformat()
+    h1 = call(1001, "POST", "/api/admin/hashars", {"when_kind": "bomdod_after", "date": _tm, "place": "Masjid oldi, maktab yo'li", "description": "Ariq va yo'l bo'yini tozalash. Belkurak va qo'lqop olib keling.", "lat": 39.96, "lon": 68.78})["id"]
+    call(1001, "POST", "/api/admin/hashars", {"when_kind": "custom", "when_time": "15:30", "date": _tm, "place": "Qabriston atrofi", "description": "To'siqni ta'mirlash"})
+    for uid in (2001, 2002, 2003): call(uid, "POST", f"/api/hashars/{h1}/join")
     call(1001, "PUT", "/api/admin/football", {"min_players": 10, "game_time": "Bugun 20:30", "game_place": "Markaziy minifutzal maydon", "daily_poll_enabled": False, "daily_poll_time": "08:00"})
     call(1001, "POST", "/api/admin/football/new-poll")
     for uid, a in [(1001, "yes"), (2001, "yes"), (2002, "no"), (2003, "yes")]: call(uid, "POST", "/api/football/vote", {"answer": a})
@@ -59,18 +64,21 @@ try:
         pg.click('#tabs button[data-tab=jamoat]'); shot(pg, "05_jamoat_vaqtlari")
         pg.click('#tabs button[data-tab=birga]'); shot(pg, "06_bomdodga_kim_boradi", full=True)
         pg.click('#bDrv'); shot(pg, "07_birga_forma")
-        pg.click('#sheetBox .btn.ghost'); pg.click('#tabs button[data-tab=futbol]'); shot(pg, "08_futbol", full=True)
+        pg.click('#sheetBox .btn.ghost:has-text("Bekor")'); pg.click('#tabs button[data-tab=futbol]'); shot(pg, "08_futbol", full=True)
         # admin
         pga, e2 = page_for(1001); allerrs += e2
         pga.goto(BASE + "/"); pga.evaluate("localStorage.setItem('tab','futbol')"); pga.reload()
         shot(pga, "09_futbol_admin", full=True)
         pga.click('#tabs button[data-tab=jamoat]'); pga.click('#editJ'); shot(pga, "10_jamoat_admin_forma")
-        pga.click('#sheetBox .btn.ghost'); pga.click('#tabs button[data-tab=profil]'); shot(pga, "11_profil_admin_azolar", full=True)
+        pga.click('#sheetBox .btn.ghost:has-text("Bekor")'); pga.click('#tabs button[data-tab=profil]'); shot(pga, "11_profil_admin_azolar", full=True)
         # ro'yxatdan o'tmagan
         I[3000] = init(3000, "Yangi", "yangi_user"); 
         pgn, e3 = page_for(3000); allerrs += e3
         pgn.goto(BASE + "/"); pgn.evaluate("localStorage.setItem('tab','birga')"); pgn.reload()
         shot(pgn, "12_royxatdan_otish", full=True)
+        pg.click('#tabs button[data-tab=hashar]'); shot(pg, "13_hashar", full=True)
+        pga.click('#tabs button[data-tab=hashar]'); shot(pga, "14_hashar_admin", full=True)
+        pga.click('#hNew'); shot(pga, "15_hashar_forma")
         br.close()
     print("JS xatolari:", allerrs or "yo'q")
 finally:

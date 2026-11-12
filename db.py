@@ -26,6 +26,18 @@ CREATE TABLE IF NOT EXISTS polls(
   notified INTEGER DEFAULT 0, auto INTEGER DEFAULT 0, created_at TEXT);
 CREATE TABLE IF NOT EXISTS votes(
   poll_id INTEGER, user_id INTEGER, answer TEXT, updated_at TEXT, PRIMARY KEY(poll_id, user_id));
+CREATE TABLE IF NOT EXISTS hashars(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL,
+  when_kind TEXT NOT NULL,              -- bomdod_after | xufton_after | custom
+  when_time TEXT DEFAULT '', date TEXT NOT NULL, place TEXT DEFAULT '', description TEXT DEFAULT '',
+  lat REAL, lon REAL, status TEXT DEFAULT 'active',   -- active | cancelled
+  created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS hashar_joins(
+  hashar_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at TEXT, PRIMARY KEY(hashar_id, user_id));
+CREATE TABLE IF NOT EXISTS bcasts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, ref_id INTEGER NOT NULL,
+  chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, created_at TEXT);
+CREATE INDEX IF NOT EXISTS ix_bcasts_ref ON bcasts(kind, ref_id);
 CREATE INDEX IF NOT EXISTS ix_rides_exp ON rides(expires_at);
 """
 

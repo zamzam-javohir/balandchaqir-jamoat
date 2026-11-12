@@ -3,6 +3,7 @@ import asyncio, html, logging, os, sqlite3, tempfile
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
                            KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove,
@@ -56,15 +57,63 @@ async def safe_location(chat_id: int, lat: float, lon: float) -> bool:
         return False
 
 
-async def broadcast(text: str, ids: list[int] | None = None, with_button=True) -> int:
-    ids = db.approved_ids() if ids is None else ids
+async def _send_retry(chat_id: int, text: str, kb=None):
+    """Xabar yuboradi; message_id qaytaradi. Bloklagan/xato bo'lsa None (e'tiborsiz)."""
+    if bot is None:
+        return None
+    for attempt in (1, 2):
+        try:
+            m = await bot.send_message(chat_id, text, reply_markup=kb)
+            return m.message_id
+        except TelegramRetryAfter as e:
+            if attempt == 2:
+                return None
+            await asyncio.sleep(min(float(e.retry_after), 30))
+        except Exception as e:  # bloklagan, topilmadi va h.k.
+            log.debug("send to %s failed: %s", chat_id, e)
+            return None
+    return None
+
+
+BROADCAST_DELAY = 0.04  # ~25 xabar/soniya
+
+
+async def broadcast(text: str, ids: list[int] | None = None, with_button=True, track=None, exclude=()) -> int:
+    """Tasdiqlangan a'zolarga xabar. track=(tur, id) bo'lsa chat_id/message_id saqlanadi (keyin o'chirish uchun)."""
+    skip = set(exclude)
+    ids = [i for i in (db.approved_ids() if ids is None else ids) if i not in skip]
     ok = 0
     kb = app_kb() if with_button else None
     for uid in ids:
-        if await safe_send(uid, text, reply_markup=kb):
+        mid = await _send_retry(uid, text, kb)
+        if mid is not None:
             ok += 1
-        await asyncio.sleep(0.05)
+            if track:
+                db.x("INSERT INTO bcasts(kind,ref_id,chat_id,message_id,created_at) VALUES(?,?,?,?,?)",
+                     (track[0], track[1], uid, mid, db.now_str()))
+        await asyncio.sleep(BROADCAST_DELAY)
     return ok
+
+
+async def retire_broadcasts(kind: str, ref_id: int, text: str = "⌛ Muddati o'tdi") -> int:
+    """Saqlangan xabarlarni o'chiradi; o'chirib bo'lmasa matnini «Muddati o'tdi»ga o'zgartiradi."""
+    rows = db.q("SELECT * FROM bcasts WHERE kind=? AND ref_id=?", (kind, ref_id))
+    if bot is None:
+        return 0
+    n = 0
+    for r in rows:
+        try:
+            await bot.delete_message(r["chat_id"], r["message_id"])
+            n += 1
+        except Exception:
+            try:
+                await bot.edit_message_text(text=text, chat_id=r["chat_id"], message_id=r["message_id"], reply_markup=None)
+                n += 1
+            except Exception as e:
+                log.debug("retire %s/%s: %s", r["chat_id"], r["message_id"], e)
+        db.x("DELETE FROM bcasts WHERE id=?", (r["id"],))
+        await asyncio.sleep(BROADCAST_DELAY)
+    return n
 
 
 async def notify_admins_new_user(row):

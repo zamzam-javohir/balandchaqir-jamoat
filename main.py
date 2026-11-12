@@ -20,6 +20,47 @@ HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 # ------------------------------------------------------------------ yordamchilar
+_bg: set = set()
+
+
+def bg(coro):
+    """Fon vazifasi (broadcast): tugamaguncha havola saqlanadi."""
+    t = asyncio.create_task(coro)
+    _bg.add(t)
+    t.add_done_callback(_bg.discard)
+    return t
+
+
+def jamoat_dt(key: str, d) -> datetime:
+    """Namozning jamoat vaqti (admin kiritgan iqomat vaqti; yo'q bo'lsa hisoblangan vaqt + 15 daq)."""
+    t = ((db.get_setting("jamoat_times") or {}).get(key) or "").strip()
+    if t and HHMM.match(t):
+        return prayer.to_dt(d, t)
+    pt = prayer.day_times(d, config.LAT, config.LNG, db.get_setting("prayer_offsets"))[key]
+    return prayer.to_dt(d, pt) + timedelta(minutes=15)
+
+
+def next_jamoat():
+    """Eng yaqin jamoat namozi: (kalit, 'today'|'tomorrow'). Xuftondan keyin — ertangi Bomdod."""
+    now = db.now()
+    for key in PRAYER_KEYS:
+        if jamoat_dt(key, now.date()) > now:
+            return key, "today"
+    return "bomdod", "tomorrow"
+
+
+def day_label(d: str) -> str:
+    today = db.now().date()
+    if d == today.isoformat():
+        return "bugun"
+    if d == (today + timedelta(days=1)).isoformat():
+        return "ertaga"
+    y, mo, dd = d.split("-")
+    return f"{dd}.{mo}.{y}"
+
+
+def map_link(lat, lon) -> str:
+    return f"https://maps.google.com/?q={lat},{lon}"
 async def current_user(x_init_data: str = Header(default="")) -> dict:
     u = validate_init_data(x_init_data, config.BOT_TOKEN, config.INITDATA_MAX_AGE)
     if not u:
@@ -124,6 +165,7 @@ async def lifespan(app: FastAPI):
             else:
                 log.warning("WEBAPP_URL yo'q — webhook o'rnatilmadi")
         tasks.append(asyncio.create_task(scheduler()))
+        tasks.append(asyncio.create_task(expiry_loop()))
     else:
         log.warning("BOT_TOKEN topilmadi — faqat API ishlaydi")
     yield
@@ -202,9 +244,12 @@ async def api_prayer(date: str | None = None, user: dict = Depends(current_user)
 # ------------------------------------------------------------------ 2. jamoat vaqtlari
 @app.get("/api/jamoat")
 async def api_jamoat(user: dict = Depends(member)):
+    nk, nd = next_jamoat()
+    now = db.now()
+    passed = {k: jamoat_dt(k, now.date()) <= now for k in PRAYER_KEYS}
     return {"times": db.get_setting("jamoat_times"), "juma_time": db.get_setting("juma_time"),
             "note": db.get_setting("jamoat_note"), "offsets": db.get_setting("prayer_offsets"),
-            "is_admin": db.is_admin(user)}
+            "is_admin": db.is_admin(user), "next_prayer": nk, "next_day": nd, "passed": passed}
 
 
 @app.put("/api/admin/jamoat")
@@ -222,10 +267,24 @@ async def api_jamoat_put(body: JamoatIn, user: dict = Depends(admin)):
     for k in prayer.PRAYERS:
         if k[0] in body.offsets:
             offs[k[0]] = max(-30, min(30, int(body.offsets[k[0]])))
+    old_times = db.get_setting("jamoat_times")
+    old_juma = db.get_setting("juma_time")
     db.set_setting("jamoat_times", times)
     db.set_setting("juma_time", juma)
     db.set_setting("jamoat_note", body.note.strip()[:300])
     db.set_setting("prayer_offsets", offs)
+    # e'lonlar muddatini yangi iqomat vaqtiga moslash
+    for r in db.q("SELECT id, prayer, date FROM rides WHERE expires_at > ?", (db.now_str(),)):
+        db.x("UPDATE rides SET expires_at=? WHERE id=?",
+             (jamoat_dt(r["prayer"], datetime.strptime(r["date"], "%Y-%m-%d").date()).strftime("%Y-%m-%d %H:%M"), r["id"]))
+    lines = []
+    for k in PRAYER_KEYS:
+        if times[k] and times[k] != (old_times.get(k) or ""):
+            lines.append(f"🕌 {PRAYER_NAMES[k]} jamoati endi <b>{times[k]}</b> da")
+    if juma and juma != (old_juma or ""):
+        lines.append(f"🕌 Juma namozi endi <b>{juma}</b> da")
+    if lines:
+        bg(bl.broadcast("🔔 <b>Jamoat vaqti o'zgardi</b>\n" + "\n".join(lines)))
     return await api_jamoat(user)
 
 
@@ -282,13 +341,24 @@ async def api_ride_create(body: RideIn, user: dict = Depends(member)):
     if lat is not None and not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise HTTPException(400, "Joylashuv noto'g'ri")
     d = db.now().date() + (timedelta(days=1) if body.day == "tomorrow" else timedelta())
-    dep = prayer.to_dt(d, body.depart_time)
-    exp = dep + timedelta(minutes=30)
+    exp = jamoat_dt(body.prayer, d)   # e'lon shu namozning jamoat vaqtigacha amal qiladi
     if exp <= db.now():
-        raise HTTPException(400, "Bu vaqt allaqachon o'tib ketgan. «Ertaga»ni tanlang yoki vaqtni o'zgartiring")
+        raise HTTPException(400, "Bu namozning jamoat vaqti allaqachon o'tib ketgan. «Ertaga»ni tanlang yoki boshqa namozni tanlang")
     rid = db.x("INSERT INTO rides(author_id,kind,prayer,date,depart_time,seats,note,share_phone,lat,lon,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                (user["tg_id"], body.kind, body.prayer, d.isoformat(), body.depart_time, seats,
                 body.note.strip()[:200], 1 if body.share_phone else 0, lat, lon, exp.strftime("%Y-%m-%d %H:%M"), db.now_str()))
+    drv = body.kind == "driver"
+    pn = PRAYER_NAMES[body.prayer]
+    lines = [f"🚗 <b>Mashinada chiqaman</b> — {pn}" if drv else f"🙋 <b>Mashinam yo'q, olib keting</b> — {pn}",
+             f"👤 {bl.user_link(user)}", f"📅 {day_label(d.isoformat()).capitalize()}, 🕒 chiqish: <b>{body.depart_time}</b>"]
+    if drv:
+        lines.append(f"💺 Bo'sh joy: {seats}")
+    if body.note.strip():
+        lines.append(f"💬 {html.escape(body.note.strip()[:200])}")
+    if lat is not None:
+        lines.append(f'📍 <a href="{map_link(lat, lon)}">Joylashuv</a>')
+    lines.append("Qo'shilish uchun ilovani oching 👇")
+    bg(bl.broadcast("\n".join(lines), track=("ride", rid), exclude=[user["tg_id"]]))
     return {"id": rid}
 
 
@@ -308,6 +378,7 @@ async def api_ride_delete(rid: int, user: dict = Depends(member)):
         raise HTTPException(403, "Faqat e'lon egasi o'chira oladi")
     db.x("DELETE FROM ride_joins WHERE ride_id=?", (rid,))
     db.x("DELETE FROM rides WHERE id=?", (rid,))
+    bg(bl.retire_broadcasts("ride", rid, "🗑 E'lon o'chirildi"))
     return {"ok": True}
 
 
@@ -403,7 +474,7 @@ async def check_game_on(poll_id: int):
     t = html.escape(t) if t else "admin e'lon qiladi"
     place = html.escape(place) if place else "admin e'lon qiladi"
     txt += f"\n🕒 Vaqt: <b>{t}</b>\n📍 Joy: <b>{place}</b>"
-    asyncio.create_task(bl.broadcast(txt))
+    bg(bl.broadcast(txt))
 
 
 async def open_new_poll(auto=False, notify=True) -> int:
@@ -415,7 +486,7 @@ async def open_new_poll(auto=False, notify=True) -> int:
         txt = f"⚽ <b>Bugun futbolga kim keladi?</b>\nIlovani ochib «Ha» yoki «Yo'q» ni tanlang.\nKamida {db.get_setting('min_players')} kishi kerak."
         if t or place:
             txt += f"\n🕒 {html.escape(t or '—')}  📍 {html.escape(place or '—')}"
-        asyncio.create_task(bl.broadcast(txt))
+        bg(bl.broadcast(txt))
     return pid
 
 
@@ -425,14 +496,42 @@ async def api_football_put(body: FootballIn, user: dict = Depends(admin)):
         raise HTTPException(400, "So'rovnoma vaqti noto'g'ri (HH:MM)")
     if body.game_time and len(body.game_time) > 60:
         raise HTTPException(400, "O'yin vaqti juda uzun")
+    old_t, old_p = db.get_setting("game_time"), db.get_setting("game_place")
+    new_t, new_p = body.game_time.strip()[:60], body.game_place.strip()[:100]
     db.set_setting("min_players", max(2, min(40, body.min_players)))
-    db.set_setting("game_time", body.game_time.strip()[:60])
-    db.set_setting("game_place", body.game_place.strip()[:100])
+    db.set_setting("game_time", new_t)
+    db.set_setting("game_place", new_p)
+    if (new_t, new_p) != (old_t, old_p):
+        e = html.escape
+        if not (new_t or new_p):
+            bg(bl.broadcast("❌ <b>Futbol o'yini bekor qilindi</b>"))
+        elif not (old_t or old_p):
+            bg(bl.broadcast(f"⚽ <b>Futbol o'yini e'lon qilindi</b>\n🕒 Vaqt: <b>{e(new_t or '—')}</b>\n📍 Joy: <b>{e(new_p or '—')}</b>"))
+        else:
+            ch = []
+            if new_t != old_t:
+                ch.append(f"🕒 Vaqt: {e(old_t or '—')} → <b>{e(new_t or '—')}</b>")
+            if new_p != old_p:
+                ch.append(f"📍 Joy: {e(old_p or '—')} → <b>{e(new_p or '—')}</b>")
+            bg(bl.broadcast("⚽ <b>Futbol o'yini o'zgardi</b>\n" + "\n".join(ch)))
     db.set_setting("daily_poll_enabled", bool(body.daily_poll_enabled))
     db.set_setting("daily_poll_time", body.daily_poll_time or "08:00")
     p = current_poll()
     if p:
         await check_game_on(p["id"])
+    return football_state(user)
+
+
+@app.post("/api/admin/football/cancel")
+async def api_football_cancel(user: dict = Depends(admin)):
+    p = current_poll()
+    if not p and not db.get_setting("game_time"):
+        raise HTTPException(409, "Bekor qilinadigan o'yin yo'q")
+    if p:
+        db.x("UPDATE polls SET status='cancelled' WHERE id=?", (p["id"],))
+    place = db.get_setting("game_place")
+    db.set_setting("game_time", "")
+    bg(bl.broadcast("❌ <b>Futbol o'yini bekor qilindi</b>" + (f"\n📍 {html.escape(place)}" if place else "")))
     return football_state(user)
 
 
@@ -487,7 +586,144 @@ async def api_user_status(uid: int, body: StatusIn, user: dict = Depends(admin))
     return {"ok": True}
 
 
+# ------------------------------------------------------------------ 6. hashar
+WHEN_LABELS = {"bomdod_after": "Bomdoddan keyin", "xufton_after": "Xuftondan keyin"}
+
+
+class HasharIn(BaseModel):
+    when_kind: str = "bomdod_after"
+    when_time: str = ""
+    date: str
+    place: str
+    description: str = ""
+    lat: float | None = None
+    lon: float | None = None
+
+
+def hashar_when(h: dict) -> str:
+    return WHEN_LABELS.get(h["when_kind"]) or (h.get("when_time") or "—")
+
+
+def hashar_json(h: dict, me: dict) -> dict:
+    joins = db.q("SELECT user_id FROM hashar_joins WHERE hashar_id=? ORDER BY rowid", (h["id"],))
+    going = [db.public_user(u) for u in (db.get_user(j["user_id"]) for j in joins) if u]
+    author = db.get_user(h["author_id"])
+    return {"id": h["id"], "when_kind": h["when_kind"], "when_time": h.get("when_time") or "", "when_label": hashar_when(h),
+            "date": h["date"], "date_label": day_label(h["date"]), "place": h["place"], "description": h["description"] or "",
+            "lat": h.get("lat"), "lon": h.get("lon"), "has_location": h.get("lat") is not None and h.get("lon") is not None,
+            "author": db.display_name(author) if author else "?", "going": going, "going_count": len(going),
+            "joined": any(g["id"] == me["tg_id"] for g in going), "can_edit": db.is_admin(me)}
+
+
+def hashar_text(h: dict, head: str) -> str:
+    e = html.escape
+    lines = [head, f"📅 <b>{e(day_label(h['date']).capitalize())}</b> ({h['date']}), 🕒 <b>{e(hashar_when(h))}</b>",
+             f"📍 Joy: <b>{e(h['place'])}</b>"]
+    if h.get("description"):
+        lines.append(f"📝 {e(h['description'])}")
+    if h.get("lat") is not None and h.get("lon") is not None:
+        lines.append(f'🗺 <a href="{map_link(h["lat"], h["lon"])}">Joylashuv (xarita)</a>')
+    return "\n".join(lines)
+
+
+def validate_hashar(body: HasharIn) -> dict:
+    if body.when_kind not in ("bomdod_after", "xufton_after", "custom"):
+        raise HTTPException(400, "Vaqt turi noto'g'ri")
+    wt = body.when_time.strip()
+    if body.when_kind == "custom" and not HHMM.match(wt):
+        raise HTTPException(400, "Vaqtni HH:MM ko'rinishida kiriting")
+    try:
+        d = datetime.strptime(body.date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Sana noto'g'ri")
+    if d < db.now().date():
+        raise HTTPException(400, "Sana o'tib ketgan")
+    place = body.place.strip()[:100]
+    if not place:
+        raise HTTPException(400, "Joyni kiriting")
+    if (body.lat is None) != (body.lon is None):
+        raise HTTPException(400, "Joylashuv to'liq emas")
+    if body.lat is not None and not (-90 <= body.lat <= 90 and -180 <= body.lon <= 180):
+        raise HTTPException(400, "Joylashuv noto'g'ri")
+    return {"when_kind": body.when_kind, "when_time": wt if body.when_kind == "custom" else "", "date": d.isoformat(),
+            "place": place, "description": body.description.strip()[:500], "lat": body.lat, "lon": body.lon}
+
+
+def _get_hashar(hid: int) -> dict:
+    h = db.q("SELECT * FROM hashars WHERE id=?", (hid,), one=True)
+    if not h or h["status"] != "active":
+        raise HTTPException(404, "Hashar topilmadi yoki bekor qilingan")
+    return h
+
+
+@app.get("/api/hashars")
+async def api_hashars(user: dict = Depends(member)):
+    rows = db.q("SELECT * FROM hashars WHERE status='active' AND date>=? ORDER BY date, id", (db.now().date().isoformat(),))
+    return {"hashars": [hashar_json(h, user) for h in rows], "can_create": db.is_admin(user)}
+
+
+@app.post("/api/admin/hashars")
+async def api_hashar_create(body: HasharIn, user: dict = Depends(admin)):
+    v = validate_hashar(body)
+    hid = db.x("INSERT INTO hashars(author_id,when_kind,when_time,date,place,description,lat,lon,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'active',?,?)",
+               (user["tg_id"], v["when_kind"], v["when_time"], v["date"], v["place"], v["description"], v["lat"], v["lon"], db.now_str(), db.now_str()))
+    h = _get_hashar(hid)
+    bg(bl.broadcast(hashar_text(h, "🤝 <b>Hashar e'lon qilindi!</b>") + "\n\nBorishingizni ilovada tasdiqlang 👇", exclude=[user["tg_id"]]))
+    return {"id": hid}
+
+
+@app.put("/api/admin/hashars/{hid}")
+async def api_hashar_edit(hid: int, body: HasharIn, user: dict = Depends(admin)):
+    old = _get_hashar(hid)
+    v = validate_hashar(body)
+    changed = any(old.get(k) != v[k] for k in v)
+    db.x("UPDATE hashars SET when_kind=?, when_time=?, date=?, place=?, description=?, lat=?, lon=?, updated_at=? WHERE id=?",
+         (v["when_kind"], v["when_time"], v["date"], v["place"], v["description"], v["lat"], v["lon"], db.now_str(), hid))
+    if changed:
+        h = _get_hashar(hid)
+        bg(bl.broadcast(hashar_text(h, "✏️ <b>Hashar ma'lumotlari o'zgardi</b>") + "\n\nIlovada borishingizni tekshiring 👇"))
+    return {"ok": True, "changed": changed}
+
+
+@app.delete("/api/admin/hashars/{hid}")
+async def api_hashar_cancel(hid: int, user: dict = Depends(admin)):
+    h = _get_hashar(hid)
+    db.x("UPDATE hashars SET status='cancelled', updated_at=? WHERE id=?", (db.now_str(), hid))
+    bg(bl.broadcast(hashar_text(h, "❌ <b>Hashar bekor qilindi</b>"), with_button=False))
+    return {"ok": True}
+
+
+@app.post("/api/hashars/{hid}/join")
+async def api_hashar_join(hid: int, user: dict = Depends(member)):
+    _get_hashar(hid)
+    db.x("INSERT OR IGNORE INTO hashar_joins(hashar_id,user_id,created_at) VALUES(?,?,?)", (hid, user["tg_id"], db.now_str()))
+    return {"ok": True}
+
+
+@app.delete("/api/hashars/{hid}/join")
+async def api_hashar_leave(hid: int, user: dict = Depends(member)):
+    db.x("DELETE FROM hashar_joins WHERE hashar_id=? AND user_id=?", (hid, user["tg_id"]))
+    return {"ok": True}
+
+
 # ------------------------------------------------------------------ rejalashtiruvchi
+async def expire_rides():
+    """Muddati o'tgan (yoki o'chirilgan) e'lonlarning bot xabarlarini o'chiradi / «Muddati o'tdi» qiladi."""
+    rows = db.q("SELECT DISTINCT b.ref_id FROM bcasts b LEFT JOIN rides r ON r.id=b.ref_id "
+                "WHERE b.kind='ride' AND (r.id IS NULL OR r.expires_at <= ?)", (db.now_str(),))
+    for r in rows:
+        await bl.retire_broadcasts("ride", r["ref_id"])
+
+
+async def expiry_loop():
+    await asyncio.sleep(10)
+    while True:
+        try:
+            await expire_rides()
+        except Exception:
+            log.exception("expire_rides")
+        await asyncio.sleep(60)
+
 async def scheduler():
     await asyncio.sleep(3)
     while True:

@@ -160,6 +160,139 @@ with TestClient(main.app) as c:
     asyncio.run(one_tick())
     check("rejalashtiruvchi kunlik so'rovnoma ochdi", db.q("SELECT count(*) n FROM polls", one=True)["n"] == n0 + 1)
 
+    print("[yangi: xabarnomalar, hashar, e'lon muddati]")
+    import asyncio, types, datetime as _dt
+    class FakeBot:
+        def __init__(self): self.sent = []; self.deleted = []; self.edited = []; self.fail_delete = set(); self.blocked = set(); self._id = 100
+        async def send_message(self, chat_id, text, reply_markup=None, **kw):
+            if chat_id in self.blocked: raise RuntimeError("Forbidden: bot was blocked by the user")
+            self._id += 1; self.sent.append((chat_id, text, self._id)); return types.SimpleNamespace(message_id=self._id)
+        async def send_location(self, *a, **k): return True
+        async def delete_message(self, chat_id, message_id):
+            if chat_id in self.fail_delete: raise RuntimeError("can't delete")
+            self.deleted.append((chat_id, message_id))
+        async def edit_message_text(self, text, chat_id, message_id, reply_markup=None): self.edited.append((chat_id, message_id, text))
+    fb = FakeBot(); main.bl.bot = fb
+    def settle():
+        for _ in range(200):
+            if not main._bg: break
+            time.sleep(0.05)
+    def msgs(sub): return [x for x in fb.sent if sub in x[1]]
+    approved = set(db.approved_ids())
+    real_now = db.now
+    def fake_now(h, mi=0):
+        base = real_now().replace(hour=h, minute=mi, second=0, microsecond=0)
+        db.now = lambda: base
+    c.put("/api/admin/jamoat", json={"times": {"bomdod": "05:45", "peshin": "13:00", "asr": "15:30", "shom": "17:10", "xufton": "19:00"}, "juma_time": "13:15", "note": "Test", "offsets": {}}, headers=admin)
+    settle(); fb.sent.clear()
+
+    # --- jamoat vaqti o'zgarishi
+    c.put("/api/admin/jamoat", json={"times": {"bomdod": "06:10", "peshin": "13:00", "asr": "15:30", "shom": "17:10", "xufton": "19:00"}, "juma_time": "13:30", "note": "", "offsets": {}}, headers=admin)
+    settle()
+    jm = msgs("jamoati endi")
+    check("Bomdod o'zgarishi hammaga xabar", len(jm) == len(approved) and "Bomdod jamoati endi <b>06:10</b> da" in jm[0][1] and {x[0] for x in jm} == approved, [x[0] for x in jm])
+    check("Juma o'zgarishi xabari", "Juma namozi endi <b>13:30</b> da" in jm[0][1] and "Peshin" not in jm[0][1])
+    fb.sent.clear()
+    c.put("/api/admin/jamoat", json={"times": {"bomdod": "06:10", "peshin": "13:00", "asr": "15:30", "shom": "17:10", "xufton": "19:00"}, "juma_time": "13:30", "note": "x", "offsets": {}}, headers=admin)
+    settle()
+    check("o'zgarmasa xabar yo'q", not fb.sent)
+
+    # --- keyingi jamoat namozi
+    fake_now(20, 0)
+    j = c.get("/api/jamoat", headers=a).json()
+    check("Xuftondan keyin -> ertangi Bomdod", j["next_prayer"] == "bomdod" and j["next_day"] == "tomorrow", j)
+    fake_now(14, 0)
+    j = c.get("/api/jamoat", headers=a).json()
+    check("14:00 -> Asr bugun", j["next_prayer"] == "asr" and j["next_day"] == "today" and j["passed"]["peshin"] and not j["passed"]["asr"], j)
+    fake_now(5, 0)
+    check("05:00 -> Bomdod bugun", c.get("/api/jamoat", headers=a).json()["next_prayer"] == "bomdod")
+
+    # --- e'lon: muddat = jamoat vaqti, broadcast
+    fake_now(14, 0)
+    check("jamoat vaqti o'tgan namozga e'lon 400", c.post("/api/rides", json={"kind": "driver", "prayer": "peshin", "day": "today", "depart_time": "12:40", "seats": 2}, headers=a).status_code == 400)
+    fb.sent.clear(); fb.blocked.add(2003)
+    r = c.post("/api/rides", json={"kind": "driver", "prayer": "asr", "day": "today", "depart_time": "15:10", "seats": 2, "note": "Markazdan <b>"}, headers=a)
+    settle()
+    nid = r.json()["id"]
+    row = db.q("SELECT * FROM rides WHERE id=?", (nid,), one=True)
+    check("muddat = Asr jamoat vaqti (15:30)", row["expires_at"].endswith("15:30"), row["expires_at"])
+    rm = msgs("Mashinada chiqaman")
+    check("e'lon muallifdan boshqa a'zolarga yuborildi (bloklagan e'tiborsiz)", {x[0] for x in rm} == approved - {2001, 2003}, sorted(x[0] for x in rm))
+    check("e'lon matni HTML-xavfsiz", "&lt;b&gt;" in rm[0][1] and "Asr" in rm[0][1])
+    check("chat_id/message_id saqlandi", db.q("SELECT count(*) n FROM bcasts WHERE kind='ride' AND ref_id=?", (nid,), one=True)["n"] == len(rm))
+    fb.blocked.clear()
+    # --- muddati o'tgach: yashirin, xabarlar o'chiriladi, o'chmasa edit
+    one = fb.sent[-1][0]; fb.fail_delete.add(one); fb.sent.clear()
+    fake_now(15, 29)
+    check("15:29 da ko'rinadi", any(x["id"] == nid for x in c.get("/api/rides?prayer=asr", headers=b).json()["rides"]))
+    asyncio.run(main.expire_rides())
+    check("muddatdan oldin xabarlar tegilmaydi", not fb.deleted and not fb.edited)
+    fake_now(15, 31)
+    check("15:31 da API'da yashirin", not any(x["id"] == nid for x in c.get("/api/rides?prayer=asr", headers=b).json()["rides"]))
+    asyncio.run(main.expire_rides())
+    check("xabarlar o'chirildi", len(fb.deleted) == len(rm) - 1, (len(fb.deleted), len(rm)))
+    check("o'chmaganiga «Muddati o'tdi» edit", len(fb.edited) == 1 and fb.edited[0][0] == one and "Muddati o'tdi" in fb.edited[0][2], fb.edited)
+    check("saqlangan yozuvlar tozalandi", db.q("SELECT count(*) n FROM bcasts WHERE ref_id=?", (nid,), one=True)["n"] == 0)
+    n_del = len(fb.deleted); asyncio.run(main.expire_rides())
+    check("qayta ishga tushirsa takrorlanmaydi", len(fb.deleted) == n_del)
+    db.now = real_now; fb.fail_delete.clear(); fb.deleted.clear(); fb.edited.clear()
+
+    # --- futbol xabarlari
+    c.put("/api/admin/football", json={"min_players": 3, "game_time": "", "game_place": "", "daily_poll_enabled": False, "daily_poll_time": "08:00"}, headers=admin); settle(); fb.sent.clear()
+    c.put("/api/admin/football", json={"min_players": 3, "game_time": "20:00", "game_place": "Maydon", "daily_poll_enabled": False, "daily_poll_time": "08:00"}, headers=admin); settle()
+    check("o'yin e'lon qilindi xabari", len(msgs("Futbol o'yini e'lon qilindi")) == len(approved) and "20:00" in msgs("e'lon qilindi")[0][1])
+    fb.sent.clear()
+    c.put("/api/admin/football", json={"min_players": 3, "game_time": "21:00", "game_place": "Maydon", "daily_poll_enabled": False, "daily_poll_time": "08:00"}, headers=admin); settle()
+    ch = msgs("Futbol o'yini o'zgardi")
+    check("vaqt o'zgarishi xabari", len(ch) == len(approved) and "20:00 → <b>21:00</b>" in ch[0][1] and "Joy" not in ch[0][1], ch[:1])
+    fb.sent.clear()
+    c.put("/api/admin/football", json={"min_players": 4, "game_time": "21:00", "game_place": "Maydon", "daily_poll_enabled": False, "daily_poll_time": "08:00"}, headers=admin); settle()
+    check("faqat min_players o'zgarsa xabar yo'q", not fb.sent)
+    check("a'zo bekor qila olmaydi", c.post("/api/admin/football/cancel", headers=a).status_code == 403)
+    c.post("/api/admin/football/new-poll", headers=admin); settle(); fb.sent.clear()
+    r = c.post("/api/admin/football/cancel", headers=admin); settle()
+    check("o'yin bekor qilindi xabari", r.status_code == 200 and len(msgs("Futbol o'yini bekor qilindi")) == len(approved))
+    check("bekor qilgach so'rovnoma yopildi, vaqt tozalandi", r.json()["poll"] is None and r.json()["game"]["time"] == "")
+    check("bekor qilinadigan o'yin yo'q 409", c.post("/api/admin/football/cancel", headers=admin).status_code == 409)
+
+    # --- hashar
+    def hz(**kw):
+        body = {"when_kind": "bomdod_after", "date": real_now().date().isoformat(), "place": "Masjid oldi", "description": "Ariq tozalash"}; body.update(kw); return body
+    check("a'zo hashar yarata olmaydi", c.post("/api/admin/hashars", json=hz(), headers=a).status_code == 403)
+    check("a'zo hashar ro'yxatini ko'radi", c.get("/api/hashars", headers=a).json()["hashars"] == [])
+    check("joysiz 400", c.post("/api/admin/hashars", json=hz(place=" "), headers=admin).status_code == 400)
+    check("boshqa vaqtda HH:MM shart", c.post("/api/admin/hashars", json=hz(when_kind="custom"), headers=admin).status_code == 400)
+    check("o'tgan sana 400", c.post("/api/admin/hashars", json=hz(date="2020-01-01"), headers=admin).status_code == 400)
+    check("noto'g'ri tur 400", c.post("/api/admin/hashars", json=hz(when_kind="x"), headers=admin).status_code == 400)
+    fb.sent.clear()
+    r = c.post("/api/admin/hashars", json=hz(lat=39.9, lon=68.7), headers=admin); settle()
+    hid = r.json()["id"]
+    hm = msgs("Hashar e'lon qilindi")
+    check("hashar e'loni a'zolarga (muallifdan boshqa) yuborildi", r.status_code == 200 and {x[0] for x in hm} == approved - {1001}, sorted(x[0] for x in hm))
+    check("xabarda vaqt, joy, tavsif, xarita", all(s in hm[0][1] for s in ["Bomdoddan keyin", "Masjid oldi", "Ariq tozalash", "maps.google.com/?q=39.9,68.7"]), hm[0][1])
+    check("a'zo ro'yxatda ko'radi", [x["id"] for x in c.get("/api/hashars", headers=a).json()["hashars"]] == [hid])
+    check("Men boraman", c.post(f"/api/hashars/{hid}/join", headers=a).status_code == 200 and c.post(f"/api/hashars/{hid}/join", headers=b).status_code == 200)
+    c.post(f"/api/hashars/{hid}/join", headers=b)
+    hj = c.get("/api/hashars", headers=a).json()["hashars"][0]
+    check("boradiganlar ro'yxati ko'rinadi, takror yo'q", hj["going_count"] == 2 and hj["joined"] and not hj["can_edit"], hj["going"])
+    c.delete(f"/api/hashars/{hid}/join", headers=b)
+    check("bekor qilish (borishni)", c.get("/api/hashars", headers=a).json()["hashars"][0]["going_count"] == 1)
+    fb.sent.clear()
+    check("a'zo tahrirlay olmaydi", c.put(f"/api/admin/hashars/{hid}", json=hz(), headers=a).status_code == 403)
+    r = c.put(f"/api/admin/hashars/{hid}", json=hz(when_kind="custom", when_time="07:30", lat=39.9, lon=68.7), headers=admin); settle()
+    em = msgs("Hashar ma'lumotlari o'zgardi")
+    check("tahrir hammaga xabar", r.json()["changed"] and len(em) == len(approved) and "07:30" in em[0][1], len(em))
+    fb.sent.clear()
+    r = c.put(f"/api/admin/hashars/{hid}", json=hz(when_kind="custom", when_time="07:30", lat=39.9, lon=68.7), headers=admin); settle()
+    check("o'zgarishsiz tahrir -> xabar yo'q", not r.json()["changed"] and not fb.sent)
+    check("a'zo bekor qila olmaydi", c.delete(f"/api/admin/hashars/{hid}", headers=a).status_code == 403)
+    r = c.delete(f"/api/admin/hashars/{hid}", headers=admin); settle()
+    check("bekor qilish hammaga xabar", r.status_code == 200 and len(msgs("Hashar bekor qilindi")) == len(approved))
+    check("bekor qilingan hashar ko'rinmaydi", c.get("/api/hashars", headers=a).json()["hashars"] == [])
+    check("bekor qilinganga yozilib bo'lmaydi 404", c.post(f"/api/hashars/{hid}/join", headers=a).status_code == 404)
+    check("tasdiqlanmagan hashar ko'rmaydi", c.get("/api/hashars", headers=H(9999)).status_code == 403)
+    main.bl.bot = None
+
     print("[sahifa]")
     r = c.get("/")
     check("index.html beriladi", r.status_code == 200 and "Balandchaqir" in r.text)

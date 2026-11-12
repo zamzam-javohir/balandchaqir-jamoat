@@ -40,7 +40,7 @@ main{padding:12px 12px 0;max-width:560px;margin:0 auto}
 .btns{display:flex;gap:8px}
 .btns .btn{flex:1}
 label{display:block;font-size:12.5px;color:var(--mut);margin:10px 0 4px;font-weight:600}
-input[type=text],input[type=tel],input[type=time],input[type=number],textarea,select{width:100%;padding:11px 12px;border:1.5px solid var(--line);border-radius:11px;font-size:16px;background:#fff;color:var(--ink);font-family:inherit}
+input[type=text],input[type=tel],input[type=time],input[type=number],input[type=date],textarea,select{width:100%;padding:11px 12px;border:1.5px solid var(--line);border-radius:11px;font-size:16px;background:#fff;color:var(--ink);font-family:inherit}
 input:focus,textarea:focus,select:focus{outline:none;border-color:var(--g3)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}

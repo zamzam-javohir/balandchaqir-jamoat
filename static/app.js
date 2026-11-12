@@ -52,6 +52,7 @@ async function render() {
     if (t === 'jamoat') return renderJamoat();
     if (t === 'birga') return renderBirga();
     if (t === 'futbol') return renderFutbol();
+    if (t === 'hashar') return renderHashar();
   } catch (e) { view.innerHTML = `<div class="card empty"><div class="ic">⚠️</div>${esc(e.message)}<div class="mt"><button class="btn ghost" onclick="render()">Qayta urinish</button></div></div>`; }
 }
 
@@ -211,6 +212,7 @@ function jamoatForm(j) {
 // ---------- 3. BIRGA BORISH ----------
 async function renderBirga() {
   view.innerHTML = '<div class="empty">Yuklanmoqda…</div>';
+  if (!state.prayerInit) { state.prayerInit = true; try { state.prayer = (await api('/api/jamoat')).next_prayer || state.prayer; } catch (e) {} }
   const d = await api('/api/rides?prayer=' + state.prayer);
   const chips = `<div class="chips">${PRAYERS.map(([k, n]) => `<button class="chip ${state.prayer === k ? 'on' : ''}" data-p="${k}">${n}</button>`).join('')}</div>`;
   const items = d.rides.map(r => rideCard(r)).join('') || `<div class="card empty"><div class="ic">🚗</div>Hozircha e'lon yo'q.<br>Birinchi bo'ling!</div>`;
@@ -271,17 +273,20 @@ async function joinRide(id) {
   } catch (e) { toast(e.message, true); }
 }
 async function rideForm(kind) {
-  let jt = {}; try { jt = (await api('/api/jamoat')).times; } catch (e) {}
-  const def = minusMin(jt[state.prayer], 20);
+  let J = { times: {}, passed: {}, next_prayer: state.prayer, next_day: 'today' }; try { J = await api('/api/jamoat'); } catch (e) {}
   const drv = kind === 'driver';
-  openSheet(`<h2>${drv ? '🚗 Mashinada chiqaman' : '🙋 Mashinam yo\'q, olib keting'} — ${prayerName(state.prayer)}</h2>
-  <div class="grid2"><div><label>Kun</label><select id="rDay"><option value="today">Bugun</option><option value="tomorrow" ${state.prayer === 'bomdod' ? 'selected' : ''}>Ertaga</option></select></div>
-  <div><label>Chiqish vaqti</label><input type="time" id="rTime" value="${def}"></div></div>
+  const p0 = J.next_prayer || state.prayer;
+  openSheet(`<h2>${drv ? '🚗 Mashinada chiqaman' : '🙋 Mashinam yo\'q, olib keting'}</h2>
+  <label>Namoz</label><select id="rPrayer">${PRAYERS.map(([k, n]) => `<option value="${k}" ${k === p0 ? 'selected' : ''}>${n}</option>`).join('')}</select>
+  <div class="muted" style="margin:-4px 0 8px">Eng yaqin jamoat namozi avtomatik tanlandi. E'lon shu namozning jamoat vaqtigacha amal qiladi.</div>
+  <div class="grid2"><div><label>Kun</label><select id="rDay"><option value="today" ${J.next_day === 'today' ? 'selected' : ''}>Bugun</option><option value="tomorrow" ${J.next_day === 'tomorrow' ? 'selected' : ''}>Ertaga</option></select></div>
+  <div><label>Chiqish vaqti</label><input type="time" id="rTime" value="${minusMin(J.times[p0], 20)}"></div></div>
   ${drv ? `<label>Bo'sh joylar soni</label><input type="number" id="rSeats" min="1" max="8" value="3">` : ''}
   <label>Izoh (ixtiyoriy)</label><input type="text" id="rNote" maxlength="200" placeholder="${drv ? 'Masalan: Markaz ko\'chasidan olaman' : 'Masalan: Maktab oldida turaman'}">
   <label class="chk"><input type="checkbox" id="rPhone"> Telefon raqamimni e'londa ko'rsatish</label>
   <div class="btns" style="margin:8px 0"><button class="btn ghost" id="rLoc" type="button">📍 Joylashuvni qo'shish</button></div><div class="muted" id="rLocInfo" style="margin-bottom:8px"></div>
   <div class="btns"><button class="btn ghost" onclick="closeSheet()">Bekor</button><button class="btn" id="rSave">E'lon qilish</button></div>`);
+  $('#rPrayer').onchange = () => { const p = $('#rPrayer').value; $('#rDay').value = J.passed[p] ? 'tomorrow' : 'today'; $('#rTime').value = minusMin(J.times[p], 20); };
   let loc = null;
   $('#rLoc').onclick = async () => {
     const btn = $('#rLoc'); btn.disabled = true; $('#rLocInfo').textContent = 'Joylashuv aniqlanmoqda…';
@@ -291,8 +296,8 @@ async function rideForm(kind) {
   };
   $('#rSave').onclick = async () => {
     try {
-      await api('/api/rides', 'POST', { lat: loc ? loc.lat : null, lon: loc ? loc.lon : null, kind, prayer: state.prayer, day: $('#rDay').value, depart_time: $('#rTime').value, seats: drv ? +$('#rSeats').value : 0, note: $('#rNote').value, share_phone: $('#rPhone').checked });
-      closeSheet(); toast("E'lon joylandi ✅"); renderBirga();
+      await api('/api/rides', 'POST', { lat: loc ? loc.lat : null, lon: loc ? loc.lon : null, kind, prayer: $('#rPrayer').value, day: $('#rDay').value, depart_time: $('#rTime').value, seats: drv ? +$('#rSeats').value : 0, note: $('#rNote').value, share_phone: $('#rPhone').checked });
+      state.prayer = $('#rPrayer').value; closeSheet(); toast("E'lon joylandi ✅ A'zolarga xabar yuborildi"); renderBirga();
     } catch (e) { toast(e.message, true); }
   };
 }
@@ -321,14 +326,64 @@ async function renderFutbol() {
     <label>Joy</label><input type="text" id="fPlace" maxlength="100" value="${esc(s.game_place)}" placeholder="Masalan: Markaziy minifutzal maydon">
     <label class="chk"><input type="checkbox" id="fAuto" ${s.daily_poll_enabled ? 'checked' : ''}> Har kuni so'rovnomani o'zi ochsin</label>
     <label>Kunlik so'rovnoma vaqti</label><input type="time" id="fAutoT" value="${esc(s.daily_poll_time)}">
-    <div class="btns mt"><button class="btn" id="fSave">Saqlash</button><button class="btn gold" id="fNew">🆕 Yangi so'rovnoma</button></div></div>`;
+    <div class="btns mt"><button class="btn" id="fSave">Saqlash</button><button class="btn gold" id="fNew">🆕 Yangi so'rovnoma</button></div>
+    <button class="btn red mt" id="fCancel">❌ O'yinni bekor qilish</button></div>`;
   }
   view.innerHTML = html;
   view.querySelectorAll('[data-v]').forEach(b => b.onclick = async () => { try { await api('/api/football/vote', 'POST', { answer: b.dataset.v }); haptic('medium'); renderFutbol(); } catch (e) { toast(e.message, true); } });
   if (f.is_admin) {
     $('#fSave').onclick = async () => { try { await api('/api/admin/football', 'PUT', { min_players: +$('#fMin').value, game_time: $('#fTime').value, game_place: $('#fPlace').value, daily_poll_enabled: $('#fAuto').checked, daily_poll_time: $('#fAutoT').value }); toast('Saqlandi ✅'); renderFutbol(); } catch (e) { toast(e.message, true); } };
+    $('#fCancel').onclick = async () => { if (!confirm("O'yin bekor qilinsin va barcha a'zolarga xabar yuborilsinmi?")) return; try { await api('/api/admin/football/cancel', 'POST'); toast("O'yin bekor qilindi"); renderFutbol(); } catch (e) { toast(e.message, true); } };
     $('#fNew').onclick = async () => { if (!confirm("Yangi so'rovnoma ochilsin va barcha a'zolarga xabar yuborilsinmi?")) return; try { await api('/api/admin/football/new-poll', 'POST'); toast("So'rovnoma ochildi ✅"); renderFutbol(); } catch (e) { toast(e.message, true); } };
   }
+}
+
+// ---------- 6. HASHAR ----------
+async function renderHashar() {
+  view.innerHTML = '<div class="empty">Yuklanmoqda…</div>';
+  const d = await api('/api/hashars');
+  const cards = d.hashars.map(h => `<div class="card ride hashar"><div class="head"><span class="pill drv">🤝 Hashar</span><span class="big" style="font-size:16px">${esc(h.when_label)}</span></div>
+    <div class="who">📅 ${esc(h.date_label.charAt(0).toUpperCase() + h.date_label.slice(1))} <span class="muted">(${esc(h.date)})</span></div>
+    <div class="meta"><span>📍 ${esc(h.place)}</span></div>
+    ${h.description ? `<div class="muted" style="margin-bottom:8px">📝 ${esc(h.description)}</div>` : ''}
+    ${h.has_location ? `<div style="margin-bottom:8px"><a href="#" class="loclink" data-lat="${+h.lat}" data-lon="${+h.lon}">📍 Joylashuv</a></div>` : ''}
+    <div class="joiners"><b>Boradiganlar (${h.going_count}):</b><br>${h.going.map(g => esc(g.name)).join(', ') || '<span class="muted">Hali hech kim</span>'}</div>
+    ${h.joined ? `<div class="btns"><div class="btn ghost" style="text-align:center">✅ Boraman</div><button class="btn red sm" style="flex:0 0 auto" data-hleave="${h.id}">Bekor</button></div>` : `<button class="btn" data-hjoin="${h.id}">🙋 Men boraman</button>`}
+    ${h.can_edit ? `<div class="btns mt"><button class="btn ghost sm" data-hedit="${h.id}">✏️ Tahrirlash</button><button class="btn red sm" data-hcancel="${h.id}">🗑 Bekor qilish</button></div>` : ''}</div>`).join('') || `<div class="card empty"><div class="ic">🤝</div>Hozircha hashar yo'q.</div>`;
+  view.innerHTML = `<h2 style="margin:4px 4px 10px;color:var(--g1)">🤝 Hashar</h2>${d.can_create ? '<button class="btn gold" id="hNew" style="margin-bottom:12px">➕ Hashar e\'lon qilish</button>' : ''}${cards}`;
+  if (d.can_create) $('#hNew').onclick = () => hasharForm(null);
+  view.querySelectorAll('.loclink').forEach(a => a.onclick = ev => { ev.preventDefault(); openMap(a.dataset.lat, a.dataset.lon); });
+  view.querySelectorAll('[data-hjoin]').forEach(b => b.onclick = async () => { try { await api(`/api/hashars/${b.dataset.hjoin}/join`, 'POST'); haptic('medium'); toast('Rahmat! Yozildingiz ✅'); renderHashar(); } catch (e) { toast(e.message, true); } });
+  view.querySelectorAll('[data-hleave]').forEach(b => b.onclick = async () => { try { await api(`/api/hashars/${b.dataset.hleave}/join`, 'DELETE'); renderHashar(); } catch (e) { toast(e.message, true); } });
+  view.querySelectorAll('[data-hcancel]').forEach(b => b.onclick = async () => { if (!confirm("Hashar bekor qilinsin va barcha a'zolarga xabar yuborilsinmi?")) return; try { await api('/api/admin/hashars/' + b.dataset.hcancel, 'DELETE'); toast('Hashar bekor qilindi'); renderHashar(); } catch (e) { toast(e.message, true); } });
+  view.querySelectorAll('[data-hedit]').forEach(b => b.onclick = () => hasharForm(d.hashars.find(x => x.id === +b.dataset.hedit)));
+}
+function hasharForm(h) {
+  const today = new Date(Date.now() + 5 * 3600e3).toISOString().slice(0, 10);
+  const kind = h ? h.when_kind : 'bomdod_after';
+  openSheet(`<h2>${h ? '✏️ Hasharni tahrirlash' : '🤝 Yangi hashar'}</h2>
+  <div class="grid2"><div><label>Qachon</label><select id="hKind"><option value="bomdod_after" ${kind === 'bomdod_after' ? 'selected' : ''}>Bomdoddan keyin</option><option value="xufton_after" ${kind === 'xufton_after' ? 'selected' : ''}>Xuftondan keyin</option><option value="custom" ${kind === 'custom' ? 'selected' : ''}>Boshqa vaqt</option></select></div>
+  <div><label>Sana</label><input type="date" id="hDate" min="${today}" value="${h ? esc(h.date) : today}"></div></div>
+  <div id="hTimeBox" style="${kind === 'custom' ? '' : 'display:none'}"><label>Vaqt</label><input type="time" id="hTime" value="${h ? esc(h.when_time) : ''}"></div>
+  <label>Joy</label><input type="text" id="hPlace" maxlength="100" value="${h ? esc(h.place) : ''}" placeholder="Masalan: Masjid oldi, maktab yo'li">
+  <label>Tavsif</label><textarea id="hDesc" maxlength="500" rows="3" placeholder="Nima ish qilinadi, nima olib kelish kerak…">${h ? esc(h.description) : ''}</textarea>
+  <div class="btns" style="margin:8px 0"><button class="btn ghost" id="hLoc" type="button">📍 ${h && h.has_location ? 'Joylashuvni yangilash' : "Joylashuvni qo'shish"}</button></div><div class="muted" id="hLocInfo" style="margin-bottom:8px">${h && h.has_location ? `${(+h.lat).toFixed(5)}, ${(+h.lon).toFixed(5)}` : ''}</div>
+  <div class="btns"><button class="btn ghost" onclick="closeSheet()">Bekor</button><button class="btn" id="hSave">${h ? 'Saqlash' : "E'lon qilish"}</button></div>`);
+  let loc = h && h.has_location ? { lat: h.lat, lon: h.lon } : null;
+  $('#hKind').onchange = () => { $('#hTimeBox').style.display = $('#hKind').value === 'custom' ? '' : 'none'; };
+  $('#hLoc').onclick = async () => {
+    const btn = $('#hLoc'); btn.disabled = true; $('#hLocInfo').textContent = 'Joylashuv aniqlanmoqda…';
+    try { loc = await getDeviceLocation(); btn.textContent = '📍 Joylashuv qo\'shildi ✅'; $('#hLocInfo').textContent = `${loc.lat.toFixed(5)}, ${loc.lon.toFixed(5)}`; }
+    catch (e) { $('#hLocInfo').textContent = loc ? `${(+loc.lat).toFixed(5)}, ${(+loc.lon).toFixed(5)}` : ''; toast(e.message, true); }
+    btn.disabled = false;
+  };
+  $('#hSave').onclick = async () => {
+    const body = { when_kind: $('#hKind').value, when_time: $('#hTime').value, date: $('#hDate').value, place: $('#hPlace').value, description: $('#hDesc').value, lat: loc ? loc.lat : null, lon: loc ? loc.lon : null };
+    try {
+      await api(h ? '/api/admin/hashars/' + h.id : '/api/admin/hashars', h ? 'PUT' : 'POST', body);
+      closeSheet(); toast(h ? "Saqlandi ✅ A'zolarga xabar yuborildi" : "Hashar e'lon qilindi ✅ A'zolarga xabar yuborildi"); renderHashar();
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 // ---------- 5. PROFIL / A'ZOLAR ----------
