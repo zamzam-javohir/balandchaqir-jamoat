@@ -1,8 +1,23 @@
 const tg = window.Telegram && Telegram.WebApp;
-if (tg) { try { tg.ready(); tg.expand(); tg.setHeaderColor('#0b3d2e'); tg.setBackgroundColor('#f3f1e8'); } catch (e) {} }
+if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+// Mavzu: Telegram mavzusiga (yorug'/qorong'i) ergashadi
+function applyTheme() {
+  const dark = ((tg && tg.colorScheme) || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  try { tg.setHeaderColor(dark ? '#000000' : '#F2F2F7'); tg.setBackgroundColor(dark ? '#000000' : '#F2F2F7'); tg.setBottomBarColor && tg.setBottomBarColor(dark ? '#1C1C1E' : '#F9F9F9'); } catch (e) {}
+}
+applyTheme();
+try { tg.onEvent('themeChanged', applyTheme); } catch (e) {}
+// Haptik: tugmalar, tablar, segmentlar
+document.addEventListener('click', e => {
+  const t = e.target.closest('.tabs button, .seg button, .chip, .vote button, .btn, summary, .chk input');
+  if (!t || !tg || !tg.HapticFeedback) return;
+  try { if (t.matches('.tabs button, .seg button, .chip, summary, .chk input')) tg.HapticFeedback.selectionChanged(); else tg.HapticFeedback.impactOccurred('light'); } catch (er) {}
+}, true);
 const $ = (s, r = document) => r.querySelector(s);
 const view = $('#view');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const PICON = { bomdod: '🌄', quyosh: '☀️', peshin: '🌤', asr: '⛅', shom: '🌇', xufton: '🌙' };
 const PRAYERS = [['bomdod', 'Bomdod'], ['peshin', 'Peshin'], ['asr', 'Asr'], ['shom', 'Shom'], ['xufton', 'Xufton']];
 const state = { me: null, tab: localStorage.getItem('tab') || 'namoz', sub: 'vaqt', prayer: 'bomdod', cdTimer: null, prayerData: null, offline: !tg || !tg.initData };
 
@@ -106,8 +121,8 @@ async function namozVaqt(box) {
   };
   const dt = new Date(d.date + 'T00:00:00');
   const months = ['yanvar', 'fevral', 'mart', 'aprel', 'may', 'iyun', 'iyul', 'avgust', 'sentabr', 'oktabr', 'noyabr', 'dekabr'];
-  box.innerHTML = `<div class="card hero"><div class="lbl">Keyingi namoz</div><div class="nm">${esc(d.next.name)}</div><div class="cd" id="cd">--:--:--</div><div class="at">${d.times.find(t => t.key === d.next.key).time} da</div></div>
-  <div class="card times"><h2>${dt.getDate()}-${months[dt.getMonth()]}, ${dt.getFullYear()}</h2>${d.times.map(t => `<div class="row ${t.key === d.next.key ? 'next' : ''} ${t.key === 'quyosh' ? 'sun' : ''}"><span>${t.key === 'quyosh' ? '☀️ ' : ''}${t.name}</span><span class="t">${t.time}</span></div>`).join('')}
+  box.innerHTML = `<div class="card hero"><div class="hero-ic">${PICON[d.next.key]}</div><div class="lbl">Keyingi namoz</div><div class="nm">${esc(d.next.name)}</div><div class="cd" id="cd">--:--:--</div><div class="at">${d.times.find(t => t.key === d.next.key).time} da</div></div>
+  <div class="card times"><h2>⏰ ${dt.getDate()}-${months[dt.getMonth()]}, ${dt.getFullYear()}</h2>${d.times.map(t => `<div class="row ${t.key === d.next.key ? 'next' : ''} ${t.key === 'quyosh' ? 'sun' : ''}"><span>${PICON[t.key]} ${t.name}</span><span class="t">${t.time}</span></div>`).join('')}
   <div class="muted mt">Hisoblash: ${esc(d.method)}. Vaqtlar mahalliy hisoblangan, masjid taqvimidan bir necha daqiqa farq qilishi mumkin.</div></div>`;
   draw(); state.cdTimer = setInterval(draw, 1000);
 }
@@ -121,7 +136,7 @@ async function qibla(box) {
   const dirs = ['shimol', 'shimoli-sharq', 'sharq', 'janubi-sharq', 'janub', 'janubi-g\'arb', 'g\'arb', 'shimoli-g\'arb'];
   const word = dirs[Math.round(q / 45) % 8];
   const ticks = Array.from({ length: 36 }, (_, i) => `<line x1="130" y1="12" x2="130" y2="${i % 9 === 0 ? 28 : 21}" stroke="#14684a" stroke-width="${i % 9 === 0 ? 3 : 1.5}" transform="rotate(${i * 10} 130 130)"/>`).join('');
-  box.innerHTML = `<div class="card center"><h2>Qibla yo'nalishi</h2><div class="qdeg" id="qdeg">${q}°</div><div class="muted">Shimoldan soat strelkasi bo'yicha — ${word}</div>
+  box.innerHTML = `<div class="card center"><h2>🧭 Qibla yo'nalishi</h2><div class="qdeg" id="qdeg">${q}°</div><div class="muted">Shimoldan soat strelkasi bo'yicha — ${word}</div>
   <div class="compass"><svg viewBox="0 0 260 260"><g id="dial"><circle cx="130" cy="130" r="122" fill="#fff" stroke="#c9a227" stroke-width="4"/>${ticks}
    <text x="130" y="48" text-anchor="middle" font-size="16" font-weight="700" fill="#c0392b">N</text><text x="130" y="224" text-anchor="middle" font-size="14" fill="#6b7a72">J</text><text x="226" y="136" text-anchor="middle" font-size="14" fill="#6b7a72">Sh</text><text x="34" y="136" text-anchor="middle" font-size="14" fill="#6b7a72">G'</text>
    <g transform="rotate(${q} 130 130)"><path d="M130 44 L139 130 L121 130 Z" fill="#14684a"/><path d="M139 130 L130 196 L121 130 Z" fill="#c9a22766"/><circle cx="130" cy="130" r="7" fill="#c9a227"/><text x="130" y="32" text-anchor="middle" font-size="20">🕋</text></g></g></svg></div>
@@ -160,7 +175,7 @@ function tasbeh(box) {
   const names = ['Subhanalloh', 'Alhamdulillah', 'Allohu akbar'];
   let zi = +localStorage.getItem('tsbZ') || 0;
   const paint = () => {
-    box.innerHTML = `<div class="card tasbeh"><h2>Tasbeh</h2>
+    box.innerHTML = `<div class="card tasbeh"><h2>📿 Tasbeh</h2>
     <div class="seg">${[33, 99, 100, 0].map(n => `<button data-t="${n}" class="${tgt === n ? 'on' : ''}">${n || '∞'}</button>`).join('')}</div>
     <div class="ar" style="text-align:center;font-size:28px;margin:0">${zikr[zi]}</div><div class="muted">${names[zi]}</div>
     <div class="tbtn" id="tb">${cnt}</div>
@@ -178,7 +193,7 @@ function tasbeh(box) {
   paint();
 }
 function duolar(box) {
-  box.innerHTML = `<div class="card"><h2>Duolar</h2>${DUOLAR.map(d => `<details class="dua"><summary>${esc(d.t)}</summary><div class="ar">${d.ar}</div>${d.tr ? `<div class="tr">${esc(d.tr)}</div>` : ''}<div class="mn">${esc(d.mn)}</div><div class="src">Manba: ${esc(d.src)}</div></details>`).join('')}
+  box.innerHTML = `<div class="card"><h2>📖 Duolar</h2>${DUOLAR.map(d => `<details class="dua"><summary>${esc(d.t)}</summary><div class="ar">${d.ar}</div>${d.tr ? `<div class="tr">${esc(d.tr)}</div>` : ''}<div class="mn">${esc(d.mn)}</div><div class="src">Manba: ${esc(d.src)}</div></details>`).join('')}
   <div class="muted mt">Matnlarni ishonchli manbalar (Qur'on, sahih hadis to'plamlari) bilan solishtirib o'qing. Tarjimalar ma'noviy.</div></div>`;
 }
 
@@ -186,9 +201,9 @@ function duolar(box) {
 async function renderJamoat() {
   view.innerHTML = '<div class="empty">Yuklanmoqda…</div>';
   const j = await api('/api/jamoat');
-  const rows = PRAYERS.map(([k, n]) => `<div class="row"><span>${n}</span><span class="t">${esc(j.times[k]) || '—'}</span></div>`).join('');
-  view.innerHTML = `<div class="card times"><h2>🕋 Masjidda jamoat vaqtlari</h2>${rows}
-  <div class="row" style="background:#fff8e1;border-radius:10px"><span>🕌 Juma namozi</span><span class="t">${esc(j.juma_time) || '—'}</span></div>
+  const rows = PRAYERS.map(([k, n]) => `<div class="row"><span>${PICON[k]} ${n}</span><span class="t">${esc(j.times[k]) || '—'}</span></div>`).join('');
+  view.innerHTML = `<div class="card times"><h2>🕌 Masjidda jamoat vaqtlari</h2>${rows}
+  <div class="row juma"><span>🕌 Juma namozi</span><span class="t">${esc(j.juma_time) || '—'}</span></div>
   ${j.note ? `<div class="muted mt">📝 ${esc(j.note)}</div>` : ''}
   ${Object.values(j.times).every(v => !v) ? '<div class="muted mt">Vaqtlar hali kiritilmagan. Admin kiritgach shu yerda ko\'rinadi.</div>' : ''}</div>
   ${j.is_admin ? '<button class="btn gold" id="editJ">✏️ Vaqtlarni tahrirlash (admin)</button>' : ''}`;
@@ -216,7 +231,7 @@ async function renderBirga() {
   const d = await api('/api/rides?prayer=' + state.prayer);
   const chips = `<div class="chips">${PRAYERS.map(([k, n]) => `<button class="chip ${state.prayer === k ? 'on' : ''}" data-p="${k}">${n}</button>`).join('')}</div>`;
   const items = d.rides.map(r => rideCard(r)).join('') || `<div class="card empty"><div class="ic">🚗</div>Hozircha e'lon yo'q.<br>Birinchi bo'ling!</div>`;
-  view.innerHTML = `<h2 style="margin:4px 4px 10px;color:var(--g1)">${prayerName(state.prayer)}ga kim boradi?</h2>${chips}
+  view.innerHTML = `<h2 style="margin:4px 4px 10px;color:var(--g1)">🚗 ${prayerName(state.prayer)}ga kim boradi?</h2>${chips}
   <div class="btns" style="margin-bottom:12px"><button class="btn" id="bDrv">🚗 Mashinada chiqaman</button><button class="btn gold" id="bReq">🙋 Mashinam yo'q</button></div>${items}`;
   view.querySelectorAll('.chip').forEach(c => c.onclick = () => { state.prayer = c.dataset.p; renderBirga(); });
   $('#bDrv').onclick = () => rideForm('driver'); $('#bReq').onclick = () => rideForm('request');
@@ -276,7 +291,7 @@ async function rideForm(kind) {
   let J = { times: {}, passed: {}, next_prayer: state.prayer, next_day: 'today' }; try { J = await api('/api/jamoat'); } catch (e) {}
   const drv = kind === 'driver';
   const p0 = J.next_prayer || state.prayer;
-  openSheet(`<h2>${drv ? '🚗 Mashinada chiqaman' : '🙋 Mashinam yo\'q, olib keting'}</h2>
+  openSheet(`<h2>${drv ? '🚗 Mashinada chiqaman' : '🚶 Mashinam yo\'q, olib keting'}</h2>
   <label>Namoz</label><select id="rPrayer">${PRAYERS.map(([k, n]) => `<option value="${k}" ${k === p0 ? 'selected' : ''}>${n}</option>`).join('')}</select>
   <div class="muted" style="margin:-4px 0 8px">Eng yaqin jamoat namozi avtomatik tanlandi. E'lon shu namozning jamoat vaqtigacha amal qiladi.</div>
   <div class="grid2"><div><label>Kun</label><select id="rDay"><option value="today" ${J.next_day === 'today' ? 'selected' : ''}>Bugun</option><option value="tomorrow" ${J.next_day === 'tomorrow' ? 'selected' : ''}>Ertaga</option></select></div>
