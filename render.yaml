@@ -1,0 +1,22 @@
+# Render.com — bepul (free) web service. Bot va backend bitta jarayonda (webhook rejimi).
+services:
+  - type: web
+    name: balandchaqir-jamoat
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: MODE
+        value: webhook
+      - key: BOT_TOKEN
+        sync: false          # Render panelida qo'lda kiriting (@BotFather tokeni)
+      - key: ADMIN_IDS
+        sync: false          # Admin Telegram ID lari, vergul bilan: 123456789,987654321
+      - key: WEBAPP_URL
+        sync: false          # https://<xizmat-nomi>.onrender.com  (oxirida "/" siz)
+      # Pullik "Disk" ulasangiz, qo'shing:  DB_PATH=/var/data/jamoat.db
