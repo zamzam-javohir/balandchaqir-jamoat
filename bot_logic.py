@@ -75,6 +75,67 @@ async def set_status(uid: int, status: str):
         await safe_send(uid, "❌ Afsuski, arizangiz rad etildi. Savol bo'lsa jamoat adminiga murojaat qiling.")
 
 
+async def set_admin(uid: int, flag: bool, by=None):
+    t = db.get_user(uid)
+    if flag:
+        db.x("UPDATE users SET is_admin=1, status='approved', updated_at=? WHERE tg_id=?", (db.now_str(), uid))
+        if not (t and t["is_admin"]):
+            who = f" ({html.escape(db.display_name(by))} tomonidan)" if by else ""
+            await safe_send(uid, f"🛡 Siz Balandchaqir Jamoat <b>admini</b> qilindingiz{who}. Ilovada admin imkoniyatlari ochildi.", reply_markup=app_kb())
+    else:
+        db.x("UPDATE users SET is_admin=0, updated_at=? WHERE tg_id=?", (db.now_str(), uid))
+        if t and t["is_admin"]:
+            await safe_send(uid, "ℹ️ Sizning adminlik huquqingiz olib tashlandi.")
+
+
+def find_user(arg: str):
+    arg = (arg or "").strip()
+    if arg.lstrip("@").isdigit():
+        return db.get_user(int(arg.lstrip("@")))
+    if arg.startswith("@") and len(arg) > 1:
+        return db.q("SELECT * FROM users WHERE lower(username)=lower(?)", (arg[1:],), one=True)
+    return None
+
+
+@router.message(Command("addadmin"))
+async def cmd_addadmin(m: Message, command: CommandObject):
+    me = db.get_user(m.from_user.id)
+    if not db.is_admin(me):
+        return
+    t = find_user(command.args)
+    if not t:
+        await m.answer("Foydalanuvchi topilmadi. Format: <code>/addadmin 123456789</code> yoki <code>/addadmin @username</code>.\n"
+                       "U avval botga /start bosgan bo'lishi kerak.")
+        return
+    if t["tg_id"] == m.from_user.id or db.is_admin(t):
+        await m.answer("Bu foydalanuvchi allaqachon admin.")
+        return
+    await set_admin(t["tg_id"], True, by=me)
+    await m.answer(f"✅ {user_link(t)} admin qilindi.")
+
+
+@router.message(Command("deladmin"))
+async def cmd_deladmin(m: Message, command: CommandObject):
+    me = db.get_user(m.from_user.id)
+    if not db.is_admin(me):
+        return
+    t = find_user(command.args)
+    if not t:
+        await m.answer("Foydalanuvchi topilmadi. Format: <code>/deladmin 123456789</code> yoki <code>/deladmin @username</code>.")
+        return
+    if t["tg_id"] == m.from_user.id:
+        await m.answer("O'zingizni adminlikdan ola olmaysiz.")
+        return
+    if t["tg_id"] in config.ADMIN_IDS:
+        await m.answer("Bosh adminni adminlikdan olib bo'lmaydi.")
+        return
+    if not t["is_admin"]:
+        await m.answer("Bu foydalanuvchi admin emas.")
+        return
+    await set_admin(t["tg_id"], False)
+    await m.answer(f"✅ {user_link(t)} adminlikdan olindi.")
+
+
 @router.message(Command("start"))
 async def cmd_start(m: Message):
     row = db.upsert_tg_user({"id": m.from_user.id, "first_name": m.from_user.first_name, "username": m.from_user.username})
@@ -188,7 +249,7 @@ async def cmd_restore(m: Message):
 
 @router.message(Command("help"))
 async def cmd_help(m: Message):
-    await m.answer("/start — ilovani ochish\n/help — yordam\n\nAdminlar uchun: /backup — baza nusxasi")
+    await m.answer("/start — ilovani ochish\n/help — yordam\n\nAdminlar uchun:\n/backup — baza nusxasi\n/addadmin &lt;id yoki @username&gt; — admin qo'shish\n/deladmin &lt;id yoki @username&gt; — adminlikdan olish")
 
 
 @router.message()

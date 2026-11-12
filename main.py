@@ -93,6 +93,9 @@ class FootballIn(BaseModel):
 class StatusIn(BaseModel):
     status: str
 
+class AdminIn(BaseModel):
+    is_admin: bool
+
 
 # ------------------------------------------------------------------ ilova
 @contextlib.asynccontextmanager
@@ -430,12 +433,31 @@ async def api_new_poll(user: dict = Depends(admin)):
 async def api_users(status: str = "pending", user: dict = Depends(admin)):
     if status == "all":
         rows = db.q("SELECT * FROM users WHERE status!='new' ORDER BY created_at DESC")
+    elif status == "admins":
+        rows = [r for r in db.q("SELECT * FROM users ORDER BY created_at DESC") if db.is_admin(r)]
     else:
         rows = db.q("SELECT * FROM users WHERE status=? ORDER BY created_at DESC", (status,))
     counts = {r["status"]: r["n"] for r in db.q("SELECT status, count(*) n FROM users GROUP BY status")}
+    counts["admins"] = len(db.admin_ids())
     return {"users": [{"id": r["tg_id"], "name": db.display_name(r), "username": r.get("username"), "phone": r.get("phone") or "",
-                       "status": r["status"], "is_admin": db.is_admin(r), "created_at": r["created_at"]} for r in rows],
+                       "status": r["status"], "is_admin": db.is_admin(r), "is_super": r["tg_id"] in config.ADMIN_IDS,
+                       "is_self": r["tg_id"] == user["tg_id"], "created_at": r["created_at"]} for r in rows],
             "counts": counts}
+
+
+@app.post("/api/admin/users/{uid}/admin")
+async def api_user_admin(uid: int, body: AdminIn, user: dict = Depends(admin)):
+    t = db.get_user(uid)
+    if not t:
+        raise HTTPException(404, "Foydalanuvchi topilmadi")
+    if uid == user["tg_id"]:
+        raise HTTPException(400, "O'zingizning admin huquqingizni o'zgartirib bo'lmaydi")
+    if not body.is_admin and uid in config.ADMIN_IDS:
+        raise HTTPException(400, "Bosh adminni adminlikdan olib bo'lmaydi")
+    if body.is_admin and t["status"] != "approved":
+        raise HTTPException(400, "Avval a'zoni tasdiqlang")
+    await bl.set_admin(uid, body.is_admin, by=user)
+    return {"ok": True}
 
 
 @app.post("/api/admin/users/{uid}/status")

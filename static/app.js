@@ -311,13 +311,15 @@ async function renderProfil() {
 async function adminUsers(filter) {
   const d = await api('/api/admin/users?status=' + filter);
   const c = d.counts || {};
-  const tabs = [['pending', 'Kutayotgan'], ['approved', 'A\'zolar'], ['rejected', 'Rad etilgan']];
+  const tabs = [['pending', 'Kutayotgan'], ['approved', 'A\'zolar'], ['admins', 'Adminlar'], ['rejected', 'Rad etilgan']];
   const box = document.createElement('div'); box.className = 'card';
   box.innerHTML = `<h2>🛡 A'zolarni boshqarish</h2><div class="seg">${tabs.map(t => `<button data-f="${t[0]}" class="${filter === t[0] ? 'on' : ''}">${t[1]} (${c[t[0]] || 0})</button>`).join('')}</div>
   ${d.users.map(u => `<div class="user"><div><b>${esc(u.name)}</b>${u.is_admin ? ' 🛡' : ''}<div class="muted">${u.username ? '@' + esc(u.username) + ' · ' : ''}${esc(u.phone) || '—'}</div></div><div class="btns" style="flex:0 0 auto">
-   ${u.status !== 'approved' ? `<button class="btn sm" data-set="approved" data-id="${u.id}">✅</button>` : ''}${u.status !== 'rejected' && !u.is_admin ? `<button class="btn red sm" data-set="rejected" data-id="${u.id}">❌</button>` : ''}</div></div>`).join('') || '<div class="empty muted">Bo\'sh</div>'}`;
+   ${u.status !== 'approved' ? `<button class="btn sm" data-set="approved" data-id="${u.id}">✅</button>` : ''}${u.status !== 'rejected' && !u.is_admin ? `<button class="btn red sm" data-set="rejected" data-id="${u.id}">❌</button>` : ''}
+   ${u.status === 'approved' && !u.is_self && !u.is_admin ? `<button class="btn sm" data-adm="1" data-id="${u.id}">🛡 Admin qilish</button>` : ''}${u.is_admin && !u.is_super && !u.is_self ? `<button class="btn red sm" data-adm="0" data-id="${u.id}">✖ Adminlikdan olish</button>` : ''}</div></div>`).join('') || '<div class="empty muted">Bo\'sh</div>'}`;
   view.appendChild(box);
   box.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { box.remove(); adminUsers(b.dataset.f); });
+  box.querySelectorAll('[data-adm]').forEach(b => b.onclick = async () => { const on = b.dataset.adm === '1'; if (!confirm(on ? 'Bu a\'zo admin qilinsinmi?' : 'Adminlik huquqi olib tashlansinmi?')) return; try { await api(`/api/admin/users/${b.dataset.id}/admin`, 'POST', { is_admin: on }); toast(on ? 'Admin qilindi ✅' : 'Adminlikdan olindi ✅'); box.remove(); adminUsers(filter); } catch (e) { toast(e.message, true); } });
   box.querySelectorAll('[data-set]').forEach(b => b.onclick = async () => { try { await api(`/api/admin/users/${b.dataset.id}/status`, 'POST', { status: b.dataset.set }); toast('Bajarildi ✅'); box.remove(); adminUsers(filter); } catch (e) { toast(e.message, true); } });
 }
 

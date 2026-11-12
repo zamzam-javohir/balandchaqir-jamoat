@@ -50,6 +50,26 @@ with TestClient(main.app) as c:
         check(f"admin {uid} ni tasdiqladi", r.status_code == 200)
     check("tasdiqlangach me.status=approved", c.get("/api/me", headers=a).json()["status"] == "approved")
 
+    print("[admin boshqaruvi]")
+    check("oddiy a'zo admin qila olmaydi", c.post("/api/admin/users/2002/admin", json={"is_admin": True}, headers=a).status_code == 403)
+    check("o'zini o'zgartira olmaydi", c.post("/api/admin/users/1001/admin", json={"is_admin": False}, headers=admin).status_code == 400)
+    check("yo'q foydalanuvchi 404", c.post("/api/admin/users/9999/admin", json={"is_admin": True}, headers=admin).status_code == 404)
+    r = c.post("/api/admin/users/2001/admin", json={"is_admin": True}, headers=admin)
+    check("admin qilindi", r.status_code == 200 and c.get("/api/me", headers=a).json()["is_admin"])
+    r = c.get("/api/admin/users?status=admins", headers=admin).json()
+    ids = {u["id"] for u in r["users"]}
+    check("Adminlar tabi: 1001 va 2001", ids == {1001, 2001} and r["counts"]["admins"] == 2, r)
+    su = next(u for u in r["users"] if u["id"] == 1001)
+    check("super-admin belgilangan", su["is_super"] and not next(u for u in r["users"] if u["id"] == 2001)["is_super"])
+    check("yangi admin boshqani admin qila oladi", c.post("/api/admin/users/2002/admin", json={"is_admin": True}, headers=a).status_code == 200)
+    check("super-adminni olib bo'lmaydi", c.post("/api/admin/users/1001/admin", json={"is_admin": False}, headers=a).status_code == 400)
+    check("tasdiqlanmagan odamni admin qilib bo'lmaydi", c.post("/api/admin/users/3001/admin", json={"is_admin": True}, headers=admin).status_code in (400, 404))
+    check("adminlikdan olish", c.post("/api/admin/users/2002/admin", json={"is_admin": False}, headers=admin).status_code == 200
+          and not c.get("/api/me", headers=b).json()["is_admin"])
+    c.post("/api/admin/users/2001/admin", json={"is_admin": False}, headers=admin)
+    check("2001 oddiy a'zoga qaytdi", not c.get("/api/me", headers=a).json()["is_admin"])
+    check("endi admin API 403", c.get("/api/admin/users", headers=a).status_code == 403)
+
     print("[namoz]")
     r = c.get("/api/prayer", headers=a).json()
     keys = [t["key"] for t in r["times"]]
