@@ -146,6 +146,57 @@ def admin_ids() -> list[int]:
     return sorted(ids | config.ADMIN_IDS)
 
 
+def summarize(conn) -> dict:
+    """Baza (ochiq ulanish) bo'yicha qisqa hisobot: a'zolar, adminlar, e'lonlar, hashar."""
+    def n(sql):
+        try:
+            return conn.execute(sql).fetchone()[0]
+        except sqlite3.Error:
+            return 0
+    return {"users": n("SELECT count(*) FROM users WHERE status!='new'"),
+            "approved": n("SELECT count(*) FROM users WHERE status='approved'"),
+            "pending": n("SELECT count(*) FROM users WHERE status='pending'"),
+            "admins": n("SELECT count(*) FROM users WHERE is_admin=1"),
+            "rides": n("SELECT count(*) FROM rides"),
+            "hashars": n("SELECT count(*) FROM hashars WHERE status='active'")}
+
+
+def current_summary() -> dict:
+    with _lock:
+        c = connect()
+        try:
+            return summarize(c)
+        finally:
+            c.close()
+
+
+def member_count() -> int:
+    """Tasdiqlangan a'zolar soni (env adminlarsiz) — bo'sh baza zaxirasini aniqlash uchun."""
+    ids = list(config.ADMIN_IDS) or [0]
+    ph = ",".join("?" * len(ids))
+    r = q(f"SELECT count(*) n FROM users WHERE status='approved' AND tg_id NOT IN ({ph})", ids, one=True)
+    return r["n"] if r else 0
+
+
+def fingerprint() -> str:
+    """Ma'lumot o'zgarganini bilish uchun barmoq izi."""
+    r = q("SELECT (SELECT count(*) FROM users) u, (SELECT count(*) FROM users WHERE status='approved') a, "
+          "(SELECT coalesce(max(updated_at),'') FROM users) uu, (SELECT count(*) FROM rides) r, "
+          "(SELECT count(*) FROM hashars) h, (SELECT count(*) FROM votes) v", one=True)
+    return "|".join(str(v) for v in r.values())
+
+
+def ensure_env_admins():
+    """ADMIN_IDS dagi bosh adminlar har doim bazada, tasdiqlangan va admin bo'lsin (tiklashdan keyin ham)."""
+    ts = now_str()
+    for uid in config.ADMIN_IDS:
+        if not q("SELECT 1 FROM users WHERE tg_id=?", (uid,), one=True):
+            x("INSERT INTO users(tg_id,first_name,status,is_admin,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+              (uid, "", "approved", 1, ts, ts))
+        else:
+            x("UPDATE users SET status='approved', is_admin=1 WHERE tg_id=?", (uid,))
+
+
 def approved_ids() -> list[int]:
     return [r["tg_id"] for r in q("SELECT tg_id FROM users WHERE status='approved'")]
 

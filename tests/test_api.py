@@ -152,7 +152,9 @@ with TestClient(main.app) as c:
     check("«O'yin bo'ladi» bir marta belgilandi", db.q("SELECT notified FROM polls ORDER BY id DESC LIMIT 1", one=True)["notified"] == 1)
     check("a'zo sozlamani ko'rmaydi", "settings" not in c.get("/api/football", headers=a).json())
     # kunlik so'rovnoma
-    c.put("/api/admin/football", json={"min_players": 3, "daily_poll_enabled": True, "daily_poll_time": "00:00"}, headers=admin)
+    from datetime import timedelta as _td
+    _pt = (db.now() - _td(minutes=5)).strftime("%H:%M")
+    c.put("/api/admin/football", json={"min_players": 3, "daily_poll_enabled": True, "daily_poll_time": _pt}, headers=admin)
     import asyncio
     n0 = db.q("SELECT count(*) n FROM polls", one=True)["n"]
     async def one_tick():
@@ -291,6 +293,34 @@ with TestClient(main.app) as c:
     check("bekor qilingan hashar ko'rinmaydi", c.get("/api/hashars", headers=a).json()["hashars"] == [])
     check("bekor qilinganga yozilib bo'lmaydi 404", c.post(f"/api/hashars/{hid}/join", headers=a).status_code == 404)
     check("tasdiqlanmagan hashar ko'rmaydi", c.get("/api/hashars", headers=H(9999)).status_code == 403)
+
+    # --- avtomatik zaxira: kuniga 1 marta, ishga tushganda yubormaydi, bo'sh bazada yubormaydi
+    docs = []
+    async def _send_document(chat_id, f, caption=None, **k): docs.append((chat_id, caption)); return types.SimpleNamespace(message_id=1)
+    fb.send_document = _send_document
+    def auto(uptime):
+        return asyncio.run(main.maybe_auto_backup(uptime=uptime))
+    main._backup_state.update(date=None, fp=None); db.set_setting("last_backup", "")
+    fake_now(23, 30)
+    check("ishga tushgandan keyin (uptime 5s) yubormaydi", auto(5) is False and not docs)
+    fake_now(10, 0)
+    check("soat 23 emas -> yubormaydi", auto(5000) is False and not docs)
+    fake_now(3, 5)
+    check("eski qoida (03:00 dan keyin) endi ishlamaydi", auto(5000) is False and not docs)
+    fake_now(23, 30)
+    _mc = db.member_count; db.member_count = lambda: 0
+    check("oddiy a'zo yo'q (reset) -> yubormaydi", auto(5000) is False and not docs)
+    db.member_count = _mc
+    check("23:30, uptime yetarli, a'zolar bor -> yuboradi", auto(5000) is True and docs and {d[0] for d in docs} <= set(db.admin_ids()), docs)
+    check("izohda a'zolar soni ko'rsatilgan", "A'zolar:" in docs[0][1] and "tasdiq so'raladi" in docs[0][1], docs[0][1])
+    n0 = len(docs)
+    check("shu kuni qayta yubormaydi", auto(5000) is False and len(docs) == n0)
+    main._backup_state["date"] = None; db.set_setting("last_backup", "")      # uyquga ketib uyg'ongandek: xotira/baza tozalandi
+    check("o'zgarish bo'lmasa (xuddi shu ma'lumot) qayta yubormaydi", auto(5000) is False and len(docs) == n0)
+    db.x("UPDATE users SET updated_at='2099-01-01 00:00' WHERE tg_id=2001")
+    check("ma'lumot o'zgarsa yuboradi", auto(5000) is True and len(docs) > n0)
+    db.now = real_now
+
     main.bl.bot = None
 
     print("[sahifa]")

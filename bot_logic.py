@@ -1,5 +1,5 @@
 """Telegram bot: /start, kontakt, admin tugmalari, xabarnomalar."""
-import asyncio, html, logging, os, sqlite3, tempfile
+import asyncio, html, logging, os, sqlite3, tempfile, time
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -275,36 +275,140 @@ async def cmd_backup(m: Message):
     await send_backup(m.from_user.id)
 
 
+def _fmt_summary(s: dict) -> str:
+    return (f"👥 A'zolar (tasdiqlangan): <b>{s['approved']}</b>\n⏳ Kutayotganlar: {s['pending']}\n🛡 Adminlar: {s['admins']}\n"
+            f"🚗 E'lonlar: {s['rides']}\n🤝 Hasharlar: {s['hashars']}")
+
+
 async def send_backup(chat_id: int):
     path = os.path.join(tempfile.gettempdir(), f"jamoat_{db.now().strftime('%Y%m%d_%H%M')}.db")
     src = db.connect()
+    summ = db.summarize(src)
     dst = sqlite3.connect(path)
     src.backup(dst)
     dst.close(); src.close()
+    cap = (f"🗄 Ma'lumotlar bazasi nusxasi.\nA'zolar: {summ['approved']}, kutayotgan: {summ['pending']}, adminlar: {summ['admins']}.\n"
+           "Tiklash uchun shu faylni qaytarib yuboring va izohga /restore yozing (tiklashdan oldin tasdiq so'raladi).")
+    if db.member_count() == 0:
+        cap += "\n⚠️ Diqqat: bazada oddiy a'zo yo'q, bu nusxani tiklamang."
     try:
-        await bot.send_document(chat_id, FSInputFile(path), caption="🗄 Ma'lumotlar bazasi nusxasi. Tiklash uchun shu faylni qaytarib yuboring va izohga /restore yozing.")
+        await bot.send_document(chat_id, FSInputFile(path), caption=cap)
     finally:
         os.remove(path)
+
+
+# ---- tiklash (restore): xulosa + tasdiq + himoya ----
+_pending_restore: dict[int, dict] = {}   # admin_id -> {"path", "ts", "new", "cur"}
+RESTORE_TTL = 15 * 60
+
+
+def inspect_backup(path: str) -> dict:
+    """Zaxira faylini tekshiradi (butunligi, jadvallar) va xulosa qaytaradi. Xato bo'lsa ValueError."""
+    try:
+        t = sqlite3.connect(path)
+        try:
+            if t.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise ValueError("fayl buzilgan")
+            tables = {r[0] for r in t.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"users", "rides", "settings"} <= tables:
+                raise ValueError("bu bizning bazaning nusxasi emas")
+            return db.summarize(t)
+        finally:
+            t.close()
+    except sqlite3.Error as e:
+        raise ValueError(f"fayl o'qilmadi ({e})")
+
+
+def restore_decision(cur: dict, new: dict, force: bool) -> tuple[bool, str]:
+    """(ruxsat, ogohlantirish). A'zolari kam zaxira `force`siz rad etiladi."""
+    if new["approved"] < cur["approved"]:
+        lost = cur["approved"] - new["approved"]
+        msg = (f"⚠️ Zaxirada tasdiqlangan a'zolar <b>{new['approved']}</b> ta, hozir esa <b>{cur['approved']}</b> ta. "
+               f"Tiklasangiz <b>{lost}</b> ta a'zo yo'qoladi.")
+        if not force:
+            return False, msg + ("\n\n❌ Shuning uchun tiklash rad etildi. Baribir tiklash kerak bo'lsa, faylni izoh "
+                                 "<code>/restore force</code> bilan qayta yuboring.")
+        return True, msg
+    return True, ""
+
+
+def apply_restore(path: str):
+    """Joriy bazani zaxira bilan almashtiradi. Oldin joriy bazaning nusxasi saqlanadi; bosh adminlar saqlanadi."""
+    keep = os.path.join(tempfile.gettempdir(), "pre_restore.db")
+    with db._lock:
+        src = db.connect(); sv = sqlite3.connect(keep)
+        src.backup(sv); sv.close(); src.close()
+        t = sqlite3.connect(path)
+        dst = db.connect()
+        try:
+            t.backup(dst)
+        finally:
+            dst.close(); t.close()
+    db.init()
+    db.ensure_env_admins()
 
 
 @router.message(F.document, F.caption.startswith("/restore"))
 async def cmd_restore(m: Message):
     if not db.is_admin(db.get_user(m.from_user.id)):
         return
-    tmp = os.path.join(tempfile.gettempdir(), "restore.db")
-    await bot.download(m.document, destination=tmp)
+    force = "force" in (m.caption or "").lower().split()
+    path = os.path.join(tempfile.gettempdir(), f"restore_{m.from_user.id}.db")
     try:
-        t = sqlite3.connect(tmp)
-        t.execute("SELECT count(*) FROM users"); t.execute("SELECT count(*) FROM rides")
-        with db._lock:
-            dst = db.connect()
-            t.backup(dst)
-            dst.close()
-        t.close()
-        db.init()
-        await m.answer("✅ Baza tiklandi.")
+        await bot.download(m.document, destination=path)
+        new = inspect_backup(path)
     except Exception as e:
-        await m.answer(f"❌ Tiklab bo'lmadi: {html.escape(str(e))}")
+        await m.answer(f"❌ Fayl yaroqsiz: {html.escape(str(e))}")
+        return
+    cur = db.current_summary()
+    ok, warn = restore_decision(cur, new, force)
+    txt = (f"🗄 <b>Zaxira ichida:</b>\n{_fmt_summary(new)}\n\n📊 <b>Hozirgi baza:</b>\n{_fmt_summary(cur)}\n\n"
+           "Tiklasangiz hozirgi ma'lumotlar zaxiradagi bilan <b>almashtiriladi</b>.")
+    if warn:
+        txt += "\n\n" + warn
+    if not ok:
+        os.remove(path)
+        await m.answer(txt)
+        return
+    _pending_restore[m.from_user.id] = {"path": path, "ts": time.time()}
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⚠️ Baribir tiklash" if warn else "✅ Tiklash", callback_data="rs:ok"),
+        InlineKeyboardButton(text="❌ Bekor qilish", callback_data="rs:no")]])
+    await m.answer(txt, reply_markup=kb)
+
+
+@router.callback_query(F.data.in_({"rs:ok", "rs:no"}))
+async def on_restore_cb(cb: CallbackQuery):
+    if not db.is_admin(db.get_user(cb.from_user.id)):
+        await cb.answer("Faqat adminlar uchun", show_alert=True)
+        return
+    p = _pending_restore.pop(cb.from_user.id, None)
+    if cb.data == "rs:no" or not p:
+        if p and os.path.exists(p["path"]):
+            os.remove(p["path"])
+        await cb.answer("Bekor qilindi" if p else "So'rov topilmadi yoki eskirgan. Faylni qaytadan yuboring", show_alert=not p)
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    if time.time() - p["ts"] > RESTORE_TTL or not os.path.exists(p["path"]):
+        await cb.answer("Tasdiq muddati o'tdi. Faylni qaytadan yuboring", show_alert=True)
+        return
+    try:
+        apply_restore(p["path"])
+        await cb.message.answer("✅ Baza tiklandi.\n\n" + _fmt_summary(db.current_summary()) +
+                                "\n\nTiklashdan oldingi baza nusxasi serverda vaqtincha saqlandi.")
+    except Exception as e:
+        await cb.message.answer(f"❌ Tiklab bo'lmadi: {html.escape(str(e))}")
+    finally:
+        if os.path.exists(p["path"]):
+            os.remove(p["path"])
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cb.answer()
 
 
 @router.message(Command("help"))

@@ -81,5 +81,47 @@ async def main():
     await dp.feed_update(bl.bot, upd(15, **msg(3001, "/deladmin 2001")))
     check("/deladmin -> oddiy a'zo", db.get_user(2001)["is_admin"] == 0)
     check("olinganga xabar ketdi", any(p.get("chat_id") == 2001 and "olib tashlandi" in p.get("text", "") for m, p in sent))
+    print("[tiklash (restore) himoyasi]")
+    import sqlite3, shutil
+    # joriy bazada 3 ta tasdiqlangan a'zo bo'lsin (2001 va 3001 oldin yaratilgan)
+    for uid in (4001, 4002):
+        db.x("INSERT OR REPLACE INTO users(tg_id,first_name,status,is_admin,created_at,updated_at) VALUES(?,?,?,?,?,?)", (uid, "M", "approved", 0, "x", "x"))
+    cur = db.current_summary()
+    def mk(path, approved):
+        c = sqlite3.connect(path); c.executescript(db.SCHEMA)
+        for i in range(approved):
+            c.execute("INSERT INTO users(tg_id,first_name,status) VALUES(?,?,'approved')", (7000 + i, "B"))
+        c.commit(); c.close()
+    small, big, bad = (os.path.join(tempfile.mkdtemp(), n) for n in ("small.db", "big.db", "bad.db"))
+    mk(small, 1); mk(big, cur["approved"] + 5); open(bad, "wb").write(b"not a database")
+    check("inspect: a'zolar soni", bl.inspect_backup(big)["approved"] == cur["approved"] + 5)
+    try: bl.inspect_backup(bad); okbad = False
+    except ValueError: okbad = True
+    check("buzuq fayl rad etiladi", okbad)
+    ns = bl.inspect_backup(small)
+    check("kam a'zoli zaxira force'siz rad etiladi", bl.restore_decision(cur, ns, False)[0] is False and "yo'qoladi" in bl.restore_decision(cur, ns, False)[1])
+    ok_f, w = bl.restore_decision(cur, ns, True)
+    check("force bilan ogohlantirib ruxsat", ok_f and "yo'qoladi" in w)
+    check("ko'p a'zoli zaxira ogohlantirishsiz", bl.restore_decision(cur, bl.inspect_backup(big), False) == (True, ""))
+    # callback orqali tasdiq
+    def cbq(data, uid):
+        return {"callback_query": {"id": "9", "chat_instance": "x", "from": {"id": uid, "is_bot": False, "first_name": "A"}, "data": data,
+                "message": {"message_id": 7, "date": 0, "chat": {"id": uid, "type": "private"}, "text": "x"}}}
+    import time as _t
+    before = db.current_summary()
+    shutil.copy(small, small + ".p"); bl._pending_restore[3001] = {"path": small + ".p", "ts": _t.time()}
+    await dp.feed_update(bl.bot, upd(20, **cbq("rs:no", 3001)))
+    check("«Bekor» bazani o'zgartirmaydi", db.current_summary() == before and 3001 not in bl._pending_restore)
+    bl._pending_restore[3001] = {"path": small + ".p", "ts": _t.time()}
+    shutil.copy(small, small + ".p")
+    await dp.feed_update(bl.bot, upd(21, **cbq("rs:ok", 2001)))    # oddiy a'zo bosdi (admin emas)
+    check("admin bo'lmaganning tasdig'i ishlamaydi", db.current_summary() == before)
+    await dp.feed_update(bl.bot, upd(22, **cbq("rs:ok", 3001)))
+    after = db.current_summary()
+    check("tasdiqlansa baza almashtiriladi", after["approved"] >= 1 and after["approved"] != before["approved"])
+    check("bosh admin (ADMIN_IDS) tiklashdan keyin ham saqlanadi", (lambda r: r and r["status"] == "approved" and r["is_admin"] == 1)(db.get_user(1001)))
+    check("tiklashdan oldingi nusxa saqlandi", os.path.exists(os.path.join(tempfile.gettempdir(), "pre_restore.db")))
+    await dp.feed_update(bl.bot, upd(23, **cbq("rs:ok", 3001)))
+    check("so'rovsiz/eskirgan tasdiq hech narsa qilmaydi", db.current_summary() == after)
 asyncio.run(main())
 print(f"\nNatija: {ok} o'tdi, {fail} xato"); sys.exit(1 if fail else 0)

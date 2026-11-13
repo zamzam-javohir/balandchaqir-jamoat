@@ -1,5 +1,5 @@
 """Balandchaqir Jamoat — FastAPI backend + aiogram bot (bitta jarayonda)."""
-import asyncio, contextlib, html, json, logging, os, re
+import asyncio, contextlib, html, json, logging, os, re, time
 from datetime import datetime, timedelta
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -724,6 +724,40 @@ async def expiry_loop():
             log.exception("expire_rides")
         await asyncio.sleep(60)
 
+BOOT_TS = time.time()
+BACKUP_HOUR = 23                 # avtomatik zaxira: har kuni 23:00–23:59 (Asia/Tashkent) oralig'ida, kuniga ko'pi bilan 1 marta
+BACKUP_MIN_UPTIME = 600          # ishga tushgandan/uyg'ongandan keyin kamida 10 daqiqa o'tmaguncha yubormaydi
+_poll_state = {"date": None}
+_backup_state = {"date": None, "fp": None}   # jarayon xotirasi (Render uyquga ketsa tozalanadi — shuning uchun qo'shimcha himoyalar bor)
+
+
+async def maybe_auto_backup(uptime: float | None = None) -> bool:
+    """Avtomatik zaxira. Yuborilmaydigan holatlar: (1) belgilangan soat emas, (2) bugun yuborilgan, (3) endigina ishga tushgan/uyg'ongan,
+    (4) bazada oddiy a'zo yo'q (reset bo'lgan, deyarli bo'sh baza), (5) oxirgi zaxiradan beri ma'lumot o'zgarmagan."""
+    now = db.now()
+    if now.hour != BACKUP_HOUR or not bl.bot:
+        return False
+    today = now.date().isoformat()
+    if db.get_setting("last_backup") == today or _backup_state["date"] == today:
+        return False
+    if (time.time() - BOOT_TS if uptime is None else uptime) < BACKUP_MIN_UPTIME:
+        return False
+    if db.member_count() == 0:
+        log.info("Avto-zaxira o'tkazib yuborildi: bazada oddiy a'zo yo'q")
+        return False
+    fp = db.fingerprint()
+    if fp == _backup_state["fp"]:
+        return False
+    db.set_setting("last_backup", today)
+    _backup_state.update(date=today, fp=fp)
+    for a in db.admin_ids()[:3]:
+        try:
+            await bl.send_backup(a)
+        except Exception as e:
+            log.warning("backup: %s", e)
+    return True
+
+
 async def scheduler():
     await asyncio.sleep(3)
     while True:
@@ -732,17 +766,16 @@ async def scheduler():
             now = db.now()
             if db.get_setting("daily_poll_enabled"):
                 hhmm = db.get_setting("daily_poll_time") or "08:00"
-                if now.strftime("%H:%M") >= hhmm and not db.q("SELECT 1 FROM polls WHERE date=? AND auto=1", (now.date().isoformat(),), one=True):
+                # faqat belgilangan vaqtdan keyingi 60 daqiqa ichida (Render uyg'onganda kun bo'yi qayta-qayta ochmaslik uchun)
+                h, mi = (int(x) for x in hhmm.split(":"))
+                start = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+                today = now.date().isoformat()
+                if (start <= now < start + timedelta(minutes=60) and _poll_state["date"] != today
+                        and not db.q("SELECT 1 FROM polls WHERE date=? AND auto=1", (today,), one=True)):
+                    _poll_state["date"] = today
                     await open_new_poll(auto=True, notify=True)
                     log.info("Kunlik futbol so'rovnomasi ochildi")
-            # kunlik zaxira nusxa (03:00 dan keyin, adminlarga)
-            if now.hour >= 3 and db.get_setting("last_backup") != now.date().isoformat() and bl.bot:
-                db.set_setting("last_backup", now.date().isoformat())
-                for a in db.admin_ids()[:3]:
-                    try:
-                        await bl.send_backup(a)
-                    except Exception as e:
-                        log.warning("backup: %s", e)
+            await maybe_auto_backup()
         except Exception:
             log.exception("scheduler")
         await asyncio.sleep(30)
