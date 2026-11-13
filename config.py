@@ -4,6 +4,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("BALANDCHAQIR_BOT_TOKEN") or ""
 WEBAPP_URL = (os.getenv("WEBAPP_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.strip().isdigit()}
 ADMIN_SETUP_CODE = os.getenv("ADMIN_SETUP_CODE", "")  # /admin <kod> orqali admin bo'lish uchun (ixtiyoriy)
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()   # postgresql://... (Neon). Bo'sh bo'lsa SQLite (DB_PATH)
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "jamoat.db"))
 MODE = os.getenv("MODE", "webhook").lower()  # webhook | polling
 PORT = int(os.getenv("PORT", "8000"))

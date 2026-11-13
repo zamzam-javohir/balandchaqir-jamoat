@@ -281,12 +281,16 @@ def _fmt_summary(s: dict) -> str:
 
 
 async def send_backup(chat_id: int):
-    path = os.path.join(tempfile.gettempdir(), f"jamoat_{db.now().strftime('%Y%m%d_%H%M')}.db")
-    src = db.connect()
-    summ = db.summarize(src)
-    dst = sqlite3.connect(path)
-    src.backup(dst)
-    dst.close(); src.close()
+    ext = "json" if db.use_pg() else "db"
+    path = os.path.join(tempfile.gettempdir(), f"jamoat_{db.now().strftime('%Y%m%d_%H%M')}.{ext}")
+    summ = db.current_summary()
+    if db.use_pg():
+        db.write_backup_json(path)
+    else:
+        src = db.connect()
+        dst = sqlite3.connect(path)
+        src.backup(dst)
+        dst.close(); src.close()
     cap = (f"🗄 Ma'lumotlar bazasi nusxasi.\nA'zolar: {summ['approved']}, kutayotgan: {summ['pending']}, adminlar: {summ['admins']}.\n"
            "Tiklash uchun shu faylni qaytarib yuboring va izohga /restore yozing (tiklashdan oldin tasdiq so'raladi).")
     if db.member_count() == 0:
@@ -303,20 +307,8 @@ RESTORE_TTL = 15 * 60
 
 
 def inspect_backup(path: str) -> dict:
-    """Zaxira faylini tekshiradi (butunligi, jadvallar) va xulosa qaytaradi. Xato bo'lsa ValueError."""
-    try:
-        t = sqlite3.connect(path)
-        try:
-            if t.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise ValueError("fayl buzilgan")
-            tables = {r[0] for r in t.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if not {"users", "rides", "settings"} <= tables:
-                raise ValueError("bu bizning bazaning nusxasi emas")
-            return db.summarize(t)
-        finally:
-            t.close()
-    except sqlite3.Error as e:
-        raise ValueError(f"fayl o'qilmadi ({e})")
+    """Zaxira faylini tekshiradi (JSON yoki SQLite) va xulosa qaytaradi. Xato bo'lsa ValueError."""
+    return db.summary_of(db.read_backup(path))
 
 
 def restore_decision(cur: dict, new: dict, force: bool) -> tuple[bool, str]:
@@ -334,16 +326,9 @@ def restore_decision(cur: dict, new: dict, force: bool) -> tuple[bool, str]:
 
 def apply_restore(path: str):
     """Joriy bazani zaxira bilan almashtiradi. Oldin joriy bazaning nusxasi saqlanadi; bosh adminlar saqlanadi."""
-    keep = os.path.join(tempfile.gettempdir(), "pre_restore.db")
-    with db._lock:
-        src = db.connect(); sv = sqlite3.connect(keep)
-        src.backup(sv); sv.close(); src.close()
-        t = sqlite3.connect(path)
-        dst = db.connect()
-        try:
-            t.backup(dst)
-        finally:
-            dst.close(); t.close()
+    data = db.read_backup(path)                       # avval to'liq tekshiramiz
+    db.write_backup_json(os.path.join(tempfile.gettempdir(), "pre_restore.json"))
+    db.load_all(data)
     db.init()
     db.ensure_env_admins()
 
@@ -353,7 +338,7 @@ async def cmd_restore(m: Message):
     if not db.is_admin(db.get_user(m.from_user.id)):
         return
     force = "force" in (m.caption or "").lower().split()
-    path = os.path.join(tempfile.gettempdir(), f"restore_{m.from_user.id}.db")
+    path = os.path.join(tempfile.gettempdir(), f"restore_{m.from_user.id}.bak")
     try:
         await bot.download(m.document, destination=path)
         new = inspect_backup(path)

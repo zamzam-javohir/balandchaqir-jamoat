@@ -19,4 +19,6 @@ services:
         sync: false          # Admin Telegram ID lari, vergul bilan: 123456789,987654321
       - key: WEBAPP_URL
         sync: false          # https://<xizmat-nomi>.onrender.com  (oxirida "/" siz)
+      - key: DATABASE_URL
+        sync: false          # Neon Postgres (pooled) ulanish satri — baza doimiy saqlanadi
       # Pullik "Disk" ulasangiz, qo'shing:  DB_PATH=/var/data/jamoat.db

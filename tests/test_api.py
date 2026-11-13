@@ -3,12 +3,15 @@ Ishga tushirish:  python tests/test_api.py
 """
 import os, sys, tempfile, time
 tmp = tempfile.mkdtemp()
+os.environ.pop("DATABASE_URL", None)
+if os.getenv("TEST_DATABASE_URL"): os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
 os.environ.update(BOT_TOKEN="123456:TEST_TOKEN_FOR_LOCAL_TESTS", DISABLE_BOT="1", DB_PATH=os.path.join(tmp, "t.db"),
                   ADMIN_IDS="1001", MODE="polling")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi.testclient import TestClient
 from auth import make_init_data
 import config, main, db
+db.reset_for_tests()
 
 ok = fail = 0
 def check(name, cond, extra=""):

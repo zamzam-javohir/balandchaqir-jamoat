@@ -1,9 +1,20 @@
-import json, os, sqlite3, threading
+import json, os, re, sqlite3, threading
 from datetime import datetime, timedelta
 from prayer import UZT
 import config
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:          # SQLite rejimida kerak emas
+    psycopg = None
+
 _lock = threading.RLock()
+
+
+def use_pg() -> bool:
+    """DATABASE_URL berilsa Postgres (Neon), aks holda SQLite (test / lokal)."""
+    return bool(config.DATABASE_URL)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -41,6 +52,45 @@ CREATE INDEX IF NOT EXISTS ix_bcasts_ref ON bcasts(kind, ref_id);
 CREATE INDEX IF NOT EXISTS ix_rides_exp ON rides(expires_at);
 """
 
+# Postgres: Telegram ID lar 2^31 dan katta -> BIGINT; avto-ID lar -> BIGSERIAL.
+PG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS users(
+  tg_id BIGINT PRIMARY KEY, first_name TEXT, username TEXT,
+  name TEXT, phone TEXT, phone_verified INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'new', is_admin INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS rides(
+  id BIGSERIAL PRIMARY KEY, author_id BIGINT NOT NULL, kind TEXT NOT NULL,
+  prayer TEXT NOT NULL, date TEXT NOT NULL, depart_time TEXT NOT NULL,
+  seats INTEGER DEFAULT 0, note TEXT, share_phone INTEGER DEFAULT 0, lat DOUBLE PRECISION, lon DOUBLE PRECISION,
+  expires_at TEXT NOT NULL, created_at TEXT);
+CREATE TABLE IF NOT EXISTS ride_joins(
+  id BIGSERIAL PRIMARY KEY, ride_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
+  created_at TEXT, UNIQUE(ride_id, user_id));
+CREATE TABLE IF NOT EXISTS polls(
+  id BIGSERIAL PRIMARY KEY, date TEXT, status TEXT DEFAULT 'open',
+  notified INTEGER DEFAULT 0, auto INTEGER DEFAULT 0, created_at TEXT);
+CREATE TABLE IF NOT EXISTS votes(
+  poll_id BIGINT, user_id BIGINT, answer TEXT, updated_at TEXT, PRIMARY KEY(poll_id, user_id));
+CREATE TABLE IF NOT EXISTS hashars(
+  id BIGSERIAL PRIMARY KEY, author_id BIGINT NOT NULL, when_kind TEXT NOT NULL,
+  when_time TEXT DEFAULT '', date TEXT NOT NULL, place TEXT DEFAULT '', description TEXT DEFAULT '',
+  lat DOUBLE PRECISION, lon DOUBLE PRECISION, status TEXT DEFAULT 'active',
+  created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS hashar_joins(
+  hashar_id BIGINT NOT NULL, user_id BIGINT NOT NULL, created_at TEXT, PRIMARY KEY(hashar_id, user_id));
+CREATE TABLE IF NOT EXISTS bcasts(
+  id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL, ref_id BIGINT NOT NULL,
+  chat_id BIGINT NOT NULL, message_id BIGINT NOT NULL, created_at TEXT);
+CREATE INDEX IF NOT EXISTS ix_bcasts_ref ON bcasts(kind, ref_id);
+CREATE INDEX IF NOT EXISTS ix_rides_exp ON rides(expires_at);
+"""
+
+TABLES = ["users", "settings", "rides", "ride_joins", "polls", "votes", "hashars", "hashar_joins", "bcasts"]
+ID_TABLES = {"rides", "ride_joins", "polls", "hashars", "bcasts"}   # `id` ustuni bor (avto-ID)
+REQUIRED_TABLES = {"users", "rides", "settings"}
+
+
 DEFAULTS = {
     "jamoat_times": {"bomdod": "", "peshin": "", "asr": "", "shom": "", "xufton": ""},
     "juma_time": "",
@@ -71,29 +121,105 @@ def connect() -> sqlite3.Connection:
     return c
 
 
+# ---- Postgres: bitta doimiy ulanish (_lock ostida), uzilsa qayta ulanadi ----
+_pg_conn = None
+
+
+def _pg():
+    global _pg_conn
+    if _pg_conn is None or _pg_conn.closed:
+        if psycopg is None:
+            raise RuntimeError("DATABASE_URL berilgan, lekin psycopg o'rnatilmagan")
+        _pg_conn = psycopg.connect(config.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=30,
+                                   prepare_threshold=None,       # pgbouncer (Neon pooler) bilan mos
+                                   keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3)
+    return _pg_conn
+
+
+def pg_close():
+    global _pg_conn
+    if _pg_conn is not None:
+        try:
+            _pg_conn.close()
+        except Exception:
+            pass
+        _pg_conn = None
+
+
+def _tr(sql: str) -> str:
+    """SQLite uslubidagi SQL ni Postgres ga o'giradi: ? -> %s, INSERT OR IGNORE."""
+    sql = sql.replace("%", "%%").replace("?", "%s")
+    if re.match(r"\s*INSERT\s+OR\s+IGNORE\s+INTO", sql, re.I):
+        sql = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", sql, count=1, flags=re.I) + " ON CONFLICT DO NOTHING"
+    return sql
+
+
+def _pg_exec(sql, args=(), fetch="none"):
+    """fetch: none | all | id (RETURNING id). Ulanish uzilgan bo'lsa bir marta qayta urinadi."""
+    sql = _tr(sql)
+    m = re.match(r"\s*INSERT\s+INTO\s+(\w+)", sql, re.I)
+    if fetch == "none" and m and m.group(1).lower() in ID_TABLES:
+        sql += " RETURNING id"; fetch = "id"
+    for attempt in (0, 1):
+        try:
+            cur = _pg().execute(sql, tuple(args))
+            if fetch == "all":
+                return cur.fetchall()
+            if fetch == "id":
+                r = cur.fetchone()
+                return r["id"] if r else None
+            return None
+        except (psycopg.OperationalError, psycopg.InterfaceError):
+            pg_close()
+            if attempt:
+                raise
+
+
 def init():
-    os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
-    with _lock, connect() as c:
-        c.executescript(SCHEMA)
-        cols = {r[1] for r in c.execute("PRAGMA table_info(rides)")}
-        for col in ("lat", "lon"):
-            if col not in cols:
-                c.execute(f"ALTER TABLE rides ADD COLUMN {col} REAL")
+    with _lock:
+        if use_pg():
+            c = _pg()
+            with c.transaction():
+                c.execute("SELECT pg_advisory_xact_lock(7203451)")     # bir vaqtda ikki nusxa ishga tushsa
+                c.execute(PG_SCHEMA)
+            return
+        os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
+        with connect() as c:
+            c.executescript(SCHEMA)
+            cols = {r[1] for r in c.execute("PRAGMA table_info(rides)")}
+            for col in ("lat", "lon"):
+                if col not in cols:
+                    c.execute(f"ALTER TABLE rides ADD COLUMN {col} REAL")
+
+
+def reset_for_tests():
+    """Faqat testlar uchun: Postgres dagi jadvallarni tozalaydi (lokal bazada yoki TEST_ALLOW_RESET=1 bo'lsa)."""
+    u = config.DATABASE_URL
+    if not use_pg() or not (os.getenv("TEST_ALLOW_RESET") == "1" or "/workspace/pgdata" in u or "localhost" in u or "127.0.0.1" in u):
+        return
+    with _lock:
+        _pg().execute("DROP TABLE IF EXISTS " + ",".join(TABLES) + " CASCADE")
 
 
 def q(sql, args=(), one=False):
-    with _lock, connect() as c:
-        cur = c.execute(sql, args)
-        rows = cur.fetchall()
-    rows = [dict(r) for r in rows]
+    with _lock:
+        if use_pg():
+            rows = [dict(r) for r in _pg_exec(sql, args, "all")]
+        else:
+            with connect() as c:
+                cur = c.execute(sql, args)
+                rows = [dict(r) for r in cur.fetchall()]
     return (rows[0] if rows else None) if one else rows
 
 
 def x(sql, args=()):
-    """INSERT/UPDATE/DELETE; lastrowid qaytaradi."""
-    with _lock, connect() as c:
-        cur = c.execute(sql, args)
-        return cur.lastrowid
+    """INSERT/UPDATE/DELETE; INSERT bo'lsa yangi id qaytaradi."""
+    with _lock:
+        if use_pg():
+            return _pg_exec(sql, args, "none")
+        with connect() as c:
+            cur = c.execute(sql, args)
+            return cur.lastrowid
 
 
 def get_setting(key):
@@ -146,28 +272,101 @@ def admin_ids() -> list[int]:
     return sorted(ids | config.ADMIN_IDS)
 
 
-def summarize(conn) -> dict:
-    """Baza (ochiq ulanish) bo'yicha qisqa hisobot: a'zolar, adminlar, e'lonlar, hashar."""
-    def n(sql):
-        try:
-            return conn.execute(sql).fetchone()[0]
-        except sqlite3.Error:
-            return 0
-    return {"users": n("SELECT count(*) FROM users WHERE status!='new'"),
-            "approved": n("SELECT count(*) FROM users WHERE status='approved'"),
-            "pending": n("SELECT count(*) FROM users WHERE status='pending'"),
-            "admins": n("SELECT count(*) FROM users WHERE is_admin=1"),
-            "rides": n("SELECT count(*) FROM rides"),
-            "hashars": n("SELECT count(*) FROM hashars WHERE status='active'")}
+def summary_of(t: dict) -> dict:
+    """Jadvallar lug'ati ({jadval: [qatorlar]}) bo'yicha qisqa hisobot."""
+    users = t.get("users", [])
+    return {"users": sum(1 for u in users if u.get("status") != "new"),
+            "approved": sum(1 for u in users if u.get("status") == "approved"),
+            "pending": sum(1 for u in users if u.get("status") == "pending"),
+            "admins": sum(1 for u in users if u.get("is_admin") == 1),
+            "rides": len(t.get("rides", [])),
+            "hashars": sum(1 for h in t.get("hashars", []) if h.get("status") == "active")}
+
+
+def dump_all() -> dict:
+    """Butun bazani {jadval: [qatorlar]} ko'rinishida qaytaradi (Postgres va SQLite uchun bir xil)."""
+    with _lock:
+        return {t: q(f"SELECT * FROM {t}") for t in TABLES}
 
 
 def current_summary() -> dict:
-    with _lock:
-        c = connect()
+    return summary_of(dump_all())
+
+
+def read_backup(path: str) -> dict:
+    """Zaxira faylini (JSON yoki eski SQLite .db) o'qib, {jadval: [qatorlar]} qaytaradi. Yaroqsiz bo'lsa ValueError."""
+    with open(path, "rb") as f:
+        head = f.read(16)
+    if head.startswith(b"SQLite format 3"):
         try:
-            return summarize(c)
-        finally:
-            c.close()
+            t = sqlite3.connect(path)
+            t.row_factory = sqlite3.Row
+            try:
+                if t.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise ValueError("fayl buzilgan")
+                have = {r[0] for r in t.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not REQUIRED_TABLES <= have:
+                    raise ValueError("bu bizning bazaning nusxasi emas")
+                return {n: [dict(r) for r in t.execute(f"SELECT * FROM {n}")] if n in have else [] for n in TABLES}
+            finally:
+                t.close()
+        except sqlite3.Error as e:
+            raise ValueError(f"fayl o'qilmadi ({e})")
+    try:
+        data = json.loads(open(path, "rb").read().decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError("fayl o'qilmadi (JSON ham, SQLite ham emas)")
+    tabs = data.get("tables") if isinstance(data, dict) and data.get("format") == "balandchaqir-jamoat" else None
+    if not isinstance(tabs, dict) or not REQUIRED_TABLES <= set(tabs):
+        raise ValueError("bu bizning bazaning nusxasi emas")
+    return {n: list(tabs.get(n) or []) for n in TABLES}
+
+
+def write_backup_json(path: str):
+    data = {"format": "balandchaqir-jamoat", "version": 1, "created_at": now_str(), "tables": dump_all()}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
+def _columns(table: str) -> list[str]:
+    if use_pg():
+        return [r["column_name"] for r in _pg_exec(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=? "
+            "ORDER BY ordinal_position", (table,), "all")]
+    with connect() as c:
+        return [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+
+
+def load_all(t: dict):
+    """Butun bazani berilgan jadvallar bilan almashtiradi (bitta tranzaksiyada: xato bo'lsa hech narsa o'zgarmaydi)."""
+    with _lock:
+        plan = []
+        for n in TABLES:
+            cols = _columns(n)
+            plan.append((n, cols, [r for r in t.get(n, [])]))
+        if use_pg():
+            c = _pg()
+            with c.transaction():
+                for n, cols, rows in plan:
+                    c.execute(f"DELETE FROM {n}")
+                    for r in rows:
+                        use = [k for k in cols if k in r]
+                        if use:
+                            c.execute(f"INSERT INTO {n}({','.join(use)}) VALUES ({','.join(['%s'] * len(use))})",
+                                      tuple(r[k] for k in use))
+                    if n in ID_TABLES:
+                        c.execute(f"SELECT setval(pg_get_serial_sequence('{n}','id'), coalesce((SELECT max(id) FROM {n}), 0) + 1, false)")
+            return
+        with connect() as c:
+            for n, cols, rows in plan:
+                c.execute(f"DELETE FROM {n}")
+                for r in rows:
+                    use = [k for k in cols if k in r]
+                    if use:
+                        c.execute(f"INSERT INTO {n}({','.join(use)}) VALUES ({','.join('?' * len(use))})", tuple(r[k] for k in use))
+            c.execute("DELETE FROM sqlite_sequence")
+            for n in ID_TABLES:
+                c.execute("INSERT INTO sqlite_sequence(name, seq) VALUES(?, coalesce((SELECT max(id) FROM " + n + "), 0))", (n,))
 
 
 def member_count() -> int:

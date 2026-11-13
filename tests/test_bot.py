@@ -1,5 +1,7 @@
 """Bot handlerlarini Telegram'siz sinash (so'rovlar yozib olinadi). python tests/test_bot.py"""
 import asyncio, os, sys, tempfile, datetime
+os.environ.pop("DATABASE_URL", None)
+if os.getenv("TEST_DATABASE_URL"): os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
 os.environ.update(BOT_TOKEN="123456:TEST_TOKEN_FOR_LOCAL_TESTS", DB_PATH=os.path.join(tempfile.mkdtemp(), "b.db"),
                   ADMIN_IDS="1001", WEBAPP_URL="https://example.com", ADMIN_SETUP_CODE="kod123")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,7 +29,7 @@ def msg(uid, text=None, **kw):
     return {"message": {"message_id": 1, "date": 0, "chat": {"id": uid, "type": "private"}, "from": {"id": uid, "is_bot": False, "first_name": "Ali", "username": "ali"}, **({"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]} if text else {}), **kw}}
 
 async def main():
-    db.init()
+    db.reset_for_tests(); db.init()
     bl.bot = Bot(bl.config.BOT_TOKEN, session=Fake())
     dp = bl.make_dispatcher()
     await dp.feed_update(bl.bot, upd(1, **msg(2001, "/start")))
@@ -85,7 +87,7 @@ async def main():
     import sqlite3, shutil
     # joriy bazada 3 ta tasdiqlangan a'zo bo'lsin (2001 va 3001 oldin yaratilgan)
     for uid in (4001, 4002):
-        db.x("INSERT OR REPLACE INTO users(tg_id,first_name,status,is_admin,created_at,updated_at) VALUES(?,?,?,?,?,?)", (uid, "M", "approved", 0, "x", "x"))
+        db.x("INSERT INTO users(tg_id,first_name,status,is_admin,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(tg_id) DO UPDATE SET status=excluded.status", (uid, "M", "approved", 0, "x", "x"))
     cur = db.current_summary()
     def mk(path, approved):
         c = sqlite3.connect(path); c.executescript(db.SCHEMA)
@@ -120,7 +122,7 @@ async def main():
     after = db.current_summary()
     check("tasdiqlansa baza almashtiriladi", after["approved"] >= 1 and after["approved"] != before["approved"])
     check("bosh admin (ADMIN_IDS) tiklashdan keyin ham saqlanadi", (lambda r: r and r["status"] == "approved" and r["is_admin"] == 1)(db.get_user(1001)))
-    check("tiklashdan oldingi nusxa saqlandi", os.path.exists(os.path.join(tempfile.gettempdir(), "pre_restore.db")))
+    check("tiklashdan oldingi nusxa saqlandi", os.path.exists(os.path.join(tempfile.gettempdir(), "pre_restore.json")))
     await dp.feed_update(bl.bot, upd(23, **cbq("rs:ok", 3001)))
     check("so'rovsiz/eskirgan tasdiq hech narsa qilmaydi", db.current_summary() == after)
 asyncio.run(main())

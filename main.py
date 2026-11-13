@@ -144,6 +144,8 @@ class AdminIn(BaseModel):
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    db.ensure_env_admins()
+    log.info("Baza: %s", "Postgres (DATABASE_URL)" if db.use_pg() else "SQLite (" + config.DB_PATH + ")")
     tasks = []
     if config.BOT_TOKEN and not os.getenv("DISABLE_BOT"):
         bl.bot = bl.make_bot()
@@ -609,7 +611,7 @@ def hashar_when(h: dict) -> str:
 
 
 def hashar_json(h: dict, me: dict) -> dict:
-    joins = db.q("SELECT user_id FROM hashar_joins WHERE hashar_id=? ORDER BY rowid", (h["id"],))
+    joins = db.q("SELECT user_id FROM hashar_joins WHERE hashar_id=? ORDER BY created_at, user_id", (h["id"],))
     going = [db.public_user(u) for u in (db.get_user(j["user_id"]) for j in joins) if u]
     author = db.get_user(h["author_id"])
     return {"id": h["id"], "when_kind": h["when_kind"], "when_time": h.get("when_time") or "", "when_label": hashar_when(h),
