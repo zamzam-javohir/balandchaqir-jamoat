@@ -325,6 +325,18 @@ with TestClient(main.app) as c:
     db.now = real_now
 
     check("keepalive: yaroqsiz manzilda xato bermaydi (False)", asyncio.run(main.ping_self("http://127.0.0.1:9/health")) is False)
+    calls = []
+    class _B:
+        def __init__(s, url): s.url = url
+        async def get_webhook_info(s): return types.SimpleNamespace(url=s.url)
+        async def set_webhook(s, url, **k): calls.append(("wh", url))
+        async def set_chat_menu_button(s, **k): calls.append(("menu",))
+    _old_bot, _old_url = main.bl.bot, config.WEBAPP_URL
+    config.WEBAPP_URL = "https://new.example.com"; main.bl.bot = _B("https://old.example.com/webhook/x")
+    check("ensure_webhook: boshqa manzil bo'lsa qaytaradi", asyncio.run(main.ensure_webhook()) is True and ("wh", main.webhook_url()) in calls and ("menu",) in calls, calls)
+    calls.clear(); main.bl.bot = _B(main.webhook_url())
+    check("ensure_webhook: to'g'ri bo'lsa tegmaydi", asyncio.run(main.ensure_webhook()) is False and not calls)
+    config.WEBAPP_URL = _old_url; main.bl.bot = _old_bot
     main.bl.bot = None
 
     print("[sahifa]")

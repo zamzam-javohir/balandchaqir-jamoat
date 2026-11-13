@@ -161,7 +161,7 @@ async def lifespan(app: FastAPI):
             log.info("Bot: polling rejimi")
         else:
             if config.WEBAPP_URL:
-                await bl.bot.set_webhook(f"{config.WEBAPP_URL}/webhook/{config.WEBHOOK_SECRET}",
+                await bl.bot.set_webhook(webhook_url(),
                                          secret_token=config.WEBHOOK_SECRET, allowed_updates=["message", "callback_query"])
                 log.info("Bot: webhook o'rnatildi")
             else:
@@ -748,10 +748,32 @@ async def ping_self(url: str) -> bool:
         return False
 
 
+def webhook_url() -> str:
+    return f"{config.WEBAPP_URL}/webhook/{config.WEBHOOK_SECRET}"
+
+
+async def ensure_webhook() -> bool:
+    """Webhook va menyu tugmasi aynan shu xizmatga qaratilganini tekshiradi; boshqa joyga o'zgargan bo'lsa (masalan eski
+    nusxa uyg'onib o'z manzilini o'rnatgan bo'lsa) qaytarib oladi. True = tuzatildi."""
+    try:
+        info = await bl.bot.get_webhook_info()
+        if info.url == webhook_url():
+            return False
+        log.warning("webhook boshqa manzilga o'zgargan (%s) -> qaytarilmoqda", (info.url or "").split("/webhook")[0])
+        await bl.bot.set_webhook(webhook_url(), secret_token=config.WEBHOOK_SECRET, allowed_updates=["message", "callback_query"])
+        await bl.setup_menu()
+        return True
+    except Exception as e:
+        log.warning("ensure_webhook: %s", e)
+        return False
+
+
 async def keepalive_loop():
     await asyncio.sleep(60)
     while True:
         await ping_self(config.WEBAPP_URL + "/health")
+        if bl.bot:
+            await ensure_webhook()
         await asyncio.sleep(KEEPALIVE_EVERY)
 
 
