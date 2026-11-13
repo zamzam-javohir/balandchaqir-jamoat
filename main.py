@@ -187,8 +187,12 @@ async def health():
 async def webhook(secret: str, request: Request):
     if secret != config.WEBHOOK_SECRET or request.headers.get("x-telegram-bot-api-secret-token") != config.WEBHOOK_SECRET:
         raise HTTPException(403)
-    upd = Update.model_validate(await request.json(), context={"bot": bl.bot})
-    await app.state.dp.feed_update(bl.bot, upd)
+    try:
+        upd = Update.model_validate(await request.json(), context={"bot": bl.bot})
+        await app.state.dp.feed_update(bl.bot, upd)
+    except Exception:
+        # 500 qaytarsak Telegram bir xil yangilanishni qayta-qayta yuboradi; xatoni yozib, 200 qaytaramiz
+        log.exception("webhook: yangilanishni qayta ishlashda xato")
     return {"ok": True}
 
 
