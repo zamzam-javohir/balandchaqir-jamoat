@@ -168,6 +168,9 @@ async def lifespan(app: FastAPI):
                 log.warning("WEBAPP_URL yo'q — webhook o'rnatilmadi")
         tasks.append(asyncio.create_task(scheduler()))
         tasks.append(asyncio.create_task(expiry_loop()))
+        if config.MODE == "webhook" and config.WEBAPP_URL.startswith("https://") and not os.getenv("NO_KEEPALIVE"):
+            tasks.append(asyncio.create_task(keepalive_loop()))
+            log.info("Keepalive yoqildi: har %s soniyada %s/health", KEEPALIVE_EVERY, config.WEBAPP_URL)
     else:
         log.warning("BOT_TOKEN topilmadi — faqat API ishlaydi")
     yield
@@ -729,6 +732,28 @@ async def expiry_loop():
         except Exception:
             log.exception("expire_rides")
         await asyncio.sleep(60)
+
+KEEPALIVE_EVERY = 540            # soniya: Render bepul xizmati 15 daqiqa so'rovsiz qolsa uxlaydi -> o'zimizning ochiq /health ga har ~9 daqiqada murojaat
+
+
+async def ping_self(url: str) -> bool:
+    """O'z ochiq manzilimizga (Render proksisi orqali) GET yuboradi; xizmat uxlab qolmasligi uchun."""
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
+            async with s.get(url) as r:
+                return r.status == 200
+    except Exception as e:
+        log.warning("keepalive: %s", e)
+        return False
+
+
+async def keepalive_loop():
+    await asyncio.sleep(60)
+    while True:
+        await ping_self(config.WEBAPP_URL + "/health")
+        await asyncio.sleep(KEEPALIVE_EVERY)
+
 
 BOOT_TS = time.time()
 BACKUP_HOUR = 23                 # avtomatik zaxira: har kuni 23:00–23:59 (Asia/Tashkent) oralig'ida, kuniga ko'pi bilan 1 marta

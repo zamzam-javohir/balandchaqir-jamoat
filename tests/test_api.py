@@ -324,6 +324,7 @@ with TestClient(main.app) as c:
     check("ma'lumot o'zgarsa yuboradi", auto(5000) is True and len(docs) > n0)
     db.now = real_now
 
+    check("keepalive: yaroqsiz manzilda xato bermaydi (False)", asyncio.run(main.ping_self("http://127.0.0.1:9/health")) is False)
     main.bl.bot = None
 
     print("[sahifa]")
